@@ -7,6 +7,7 @@ TWEAK_NAME := AppToolsRatioPatch
 
 AppToolsRatioPatch_FILES := \
     AppToolsUI.xm \
+    AppRatioRuntime.xm \
     RatioStore.m
 
 AppToolsRatioPatch_CFLAGS := \
@@ -16,8 +17,5 @@ AppToolsRatioPatch_CFLAGS := \
 AppToolsRatioPatch_FRAMEWORKS := \
     UIKit \
     Foundation
-
-AppToolsRatioPatch_PRIVATE_FRAMEWORKS := \
-    CoreServices
 
 include $(THEOS_MAKE_PATH)/tweak.mk
