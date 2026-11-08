@@ -1,5 +1,6 @@
 TARGET := iphone:clang:16.5:15.0
 ARCHS := arm64 arm64e
+THEOS_PACKAGE_SCHEME := rootless
 
 include $(THEOS)/makefiles/common.mk
 
@@ -10,12 +11,7 @@ AppToolsRatioPatch_FILES := \
     AppRatioRuntime.xm \
     RatioStore.m
 
-AppToolsRatioPatch_CFLAGS := \
-    -fobjc-arc \
-    -Wno-deprecated-declarations
-
-AppToolsRatioPatch_FRAMEWORKS := \
-    UIKit \
-    Foundation
+AppToolsRatioPatch_CFLAGS := -fobjc-arc -Wno-deprecated-declarations
+AppToolsRatioPatch_FRAMEWORKS := UIKit Foundation
 
 include $(THEOS_MAKE_PATH)/tweak.mk

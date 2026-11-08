@@ -1,0 +1,9 @@
+Package: com.trantu2641.apptools-ratio-patch
+Name: AppTools Ratio Patch (build component)
+Version: 1.0.0
+Architecture: iphoneos-arm64
+Description: Build component used to inject the AppTools ratio patch into the original RootHide package.
+Maintainer: trantu2641
+Author: trantu2641
+Section: Tweaks
+Depends: mobilesubstrate
