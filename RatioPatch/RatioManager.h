@@ -1,36 +1,23 @@
-#ifndef AppToolsRatioCommon_h
-#define AppToolsRatioCommon_h
-
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 
-static NSString * const ATRatioStorePath =
-    @"/var/mobile/Library/Preferences/com.jtisvn.apptools.screenratio.plist";
+@interface ATRatioManager : NSObject
 
-static NSString * const ATRatioNotification =
-    @"com.jtisvn.apptools.screenratio.changed";
++ (instancetype)sharedManager;
 
-typedef struct {
-    CGFloat width;
-    CGFloat height;
-} ATRatio;
+- (void)setRatioForBundleID:(NSString *)bundleID
+                      width:(CGFloat)width
+                     height:(CGFloat)height;
 
-static inline ATRatio ATRatioMake(CGFloat width, CGFloat height) {
-    ATRatio r;
-    r.width = width;
-    r.height = height;
-    return r;
-}
+- (void)setPresetRatioForBundleID:(NSString *)bundleID
+                            ratio:(NSString *)ratio;
 
-static inline BOOL ATRatioValid(ATRatio r) {
-    return r.width > 0.0 && r.height > 0.0;
-}
+- (NSDictionary *)ratioForBundleID:(NSString *)bundleID;
 
-static inline CGFloat ATRatioValue(ATRatio r) {
-    if (r.height == 0.0)
-        return 0.0;
+- (void)applyRatioToApplication:(UIApplication *)application;
 
-    return r.width / r.height;
-}
+- (void)applyRatioToWindow:(UIWindow *)window
+                 width:(CGFloat)width
+                height:(CGFloat)height;
 
-#endif
+@end
