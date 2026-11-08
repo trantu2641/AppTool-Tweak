@@ -7,13 +7,12 @@
 /*
  * App-specific viewport runtime.
  *
- * Important differences from the previous version:
- *  - The setting is read from the target app's CFPreferences domain.
- *  - A Darwin notification refreshes a process that was already running
- *    when the user selected a ratio in AppTools.
- *  - The UIKit hook is installed only after this process has a valid ratio.
- *  - No UIScreen.bounds/applicationFrame or UIWindow.layoutSubviews hook.
- *  - The root controller's content view is letterboxed inside its window.
+ * The process reads its own Bundle ID's ratio from ATRatioStore. AppTools
+ * publishes a Darwin notification when the value changes. The hook is
+ * installed only in a target app after that app has a valid saved ratio.
+ *
+ * This implementation does not hook UIScreen.bounds,
+ * UIScreen.applicationFrame, or UIWindow.layoutSubviews.
  */
 
 static NSString *gATRatioTargetBundleID = nil;
@@ -38,9 +37,8 @@ static BOOL ATRatioRectsEqual(CGRect a, CGRect b) {
 }
 
 /*
- * The presets are expressed as long-side:short-side (16:9, 4:3, ...).
- * For portrait use 9:16, 3:4, etc.; for landscape use the inverse.
- * The resulting view is centered and the uncovered region is black.
+ * Presets are expressed as long-side:short-side (16:9, 4:3, ...).
+ * The content viewport is centered and the uncovered area is black.
  */
 static CGRect ATRatioViewportFrame(UIWindow *window, ATRatio ratio) {
     CGRect bounds = window.bounds;
@@ -165,10 +163,8 @@ static void ATRatioApplyToRootController(UIViewController *controller) {
         targetFrame = [rootView.superview convertRect:frameInWindow fromView:window];
     }
 
-    /* The window supplies the black letterbox around the app's content. */
     window.backgroundColor = UIColor.blackColor;
     window.clipsToBounds = YES;
-
     rootView.clipsToBounds = YES;
     rootView.autoresizingMask = UIViewAutoresizingNone;
 
@@ -176,7 +172,6 @@ static void ATRatioApplyToRootController(UIViewController *controller) {
         [UIView performWithoutAnimation:^{
             rootView.frame = targetFrame;
             [rootView setNeedsLayout];
-            [rootView layoutIfNeeded];
         }];
     }
 }
@@ -197,6 +192,19 @@ static void ATRatioApplyToVisibleWindows(void) {
         }
     }
 }
+
+#pragma mark - Logos group declaration MUST precede every %init using it
+
+%group ATRatioSelectedTargetApp
+%hook UIViewController
+
+- (void)viewDidLayoutSubviews {
+    %orig;
+    ATRatioApplyToRootController(self);
+}
+
+%end
+%end
 
 #pragma mark - Read the current process's own preference domain
 
@@ -248,19 +256,6 @@ static void ATRatioApplicationDidBecomeActive(NSNotification *notification) {
     ATRatioReloadForCurrentProcess();
 }
 
-#pragma mark - Hook target app's root-controller layout only after a ratio is present
-
-%group ATRatioSelectedTargetApp
-%hook UIViewController
-
-- (void)viewDidLayoutSubviews {
-    %orig;
-    ATRatioApplyToRootController(self);
-}
-
-%end
-%end
-
 #pragma mark - Runtime entry point
 
 __attribute__((constructor))
@@ -274,11 +269,7 @@ static void ATRatioTargetRuntimeInit(void) {
             return;
         }
 
-        /*
-         * Observe first, then read. This supports both cases:
-         * 1) ratio was selected before this app launched;
-         * 2) this app was already running when AppTools changed the ratio.
-         */
+        /* Observe first, then read. This supports already-running target apps. */
         CFNotificationCenterAddObserver(
             CFNotificationCenterGetDarwinNotifyCenter(),
             NULL,
