@@ -1,38 +1,74 @@
-name: Build AppTools VI + Screen Ratio
+name: Build AppTools VI + Ratio
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "RatioPatch/**"
+      - "scripts/**"
+      - "localization/**"
+      - ".github/workflows/build.yml"
+      - "original/**"
 
 jobs:
   build:
     runs-on: macos-14
-
+    permissions:
+      contents: read
     steps:
-
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Install build tools
         run: |
-          brew install dpkg
+          brew update
+          brew install dpkg ldid
 
-      - name: Install Theos
+      - name: Install Theos and iOS SDK
+        shell: bash
         run: |
-          git clone --recursive \
-            https://github.com/theos/theos.git \
-            "$HOME/theos"
-
-      - name: Prepare environment
-        run: |
+          set -euo pipefail
+          git clone --depth 1 --recursive https://github.com/theos/theos.git "$HOME/theos"
+          mkdir -p "$HOME/theos/sdks"
+          git clone --depth 1 https://github.com/theos/sdks.git "$RUNNER_TEMP/theos-sdks"
+          test -d "$RUNNER_TEMP/theos-sdks/iPhoneOS16.5.sdk"
+          cp -R "$RUNNER_TEMP/theos-sdks/iPhoneOS16.5.sdk" "$HOME/theos/sdks/"
           echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
+          echo "THEOS_PACKAGE_SCHEME=rootless" >> "$GITHUB_ENV"
 
-      - name: Build
+      - name: Verify source files
+        shell: bash
         run: |
+          set -euo pipefail
+          test -f original/AppTools-2.9.0.deb
+          test -f RatioPatch/control
+          test -f RatioPatch/Makefile
+          test -f RatioPatch/AppToolsUI.xm
+          test -f RatioPatch/AppRatioRuntime.xm
+          test -f RatioPatch/RatioStore.m
+          test -d "$THEOS/sdks/iPhoneOS16.5.sdk"
+          dpkg-deb --info original/AppTools-2.9.0.deb
+
+      - name: Build patch package
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd RatioPatch
+          make clean
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+          test -n "$(find packages -maxdepth 1 -type f -name '*.deb' -print -quit)"
+
+      - name: Repack original AppTools
+        shell: bash
+        run: |
+          set -euo pipefail
           chmod +x scripts/build.sh
           ./scripts/build.sh
 
-      - name: Upload DEB
+      - name: Upload modified DEB
         uses: actions/upload-artifact@v4
         with:
           name: AppTools-2.9.0-VI-Ratio
           path: dist/*.deb
+          if-no-files-found: error
