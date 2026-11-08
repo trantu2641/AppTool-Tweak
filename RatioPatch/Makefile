@@ -6,18 +6,15 @@ include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME := AppToolsRatioPatch
 
-# Safe-mode mitigation:
-# Do NOT compile AppRatioRuntime.xm here. It globally hooks UIScreen.bounds,
-# UIScreen.applicationFrame and UIWindow.layoutSubviews, which can destabilize
-# SpringBoard and apps. The target-app ratio engine must be implemented and
-# tested as a separate, narrowly injected component before being enabled.
 AppToolsRatioPatch_FILES := \
     AppToolsUI.xm \
+    AppRatioRuntime.xm \
     RatioStore.m
 
 AppToolsRatioPatch_CFLAGS := \
     -fobjc-arc \
-    -Wno-deprecated-declarations
+    -Wno-deprecated-declarations \
+    -Wno-objc-method-access
 
 AppToolsRatioPatch_FRAMEWORKS := UIKit Foundation
 
