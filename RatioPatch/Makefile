@@ -9,6 +9,7 @@ TWEAK_NAME := AppToolsRatioPatch
 AppToolsRatioPatch_FILES := \
     AppToolsUI.xm \
     AppRatioRuntime.xm \
+    DPIKeyboardFix.xm \
     RatioStore.m
 
 AppToolsRatioPatch_CFLAGS := \
