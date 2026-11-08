@@ -1,13 +1,29 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
+#import <objc/message.h>
 
 #import "RatioStore.h"
 
-#pragma mark - Helpers
+/* This class exists in the AppTools 2.9.0 binary. Keep the hook scoped to this
+ * AppTools popup controller instead of UIViewController globally. */
+@interface ATPopupViewController : UIViewController
+@end
 
-static NSString *ATRGetSelectedBundleID(void) {
+static const NSInteger kATRatioButtonTag = 0xA709;
 
-    NSArray<NSString *> *candidateSelectors = @[
+#pragma mark - Controller helpers
+
+static UIViewController *ATRatioTopController(UIViewController *controller) {
+    UIViewController *current = controller;
+    while (current.presentedViewController) {
+        current = current.presentedViewController;
+    }
+    return current;
+}
+
+static NSArray<NSString *> *ATRatioBundleIDSelectors(void) {
+    return @[
+        @"applicationBundleID",
         @"bundleIdentifier",
         @"selectedBundleIdentifier",
         @"currentBundleIdentifier",
@@ -16,34 +32,67 @@ static NSString *ATRGetSelectedBundleID(void) {
         @"selectedBundleID",
         @"currentBundleID"
     ];
+}
 
-    for (NSString *selectorName in candidateSelectors) {
+static NSString *ATRatioReadBundleIDFromObject(id object) {
+    if (!object || object == [NSNull null]) {
+        return nil;
+    }
 
-        SEL selector =
-            NSSelectorFromString(selectorName);
+    for (NSString *selectorName in ATRatioBundleIDSelectors()) {
+        SEL selector = NSSelectorFromString(selectorName);
+        Method method = class_getInstanceMethod([object class], selector);
+        if (!method || method_getNumberOfArguments(method) != 2) {
+            continue;
+        }
 
-        for (id object in @[
-            UIApplication.sharedApplication.keyWindow.rootViewController ?: [NSNull null]
-        ]) {
-
-            if (object == [NSNull null])
-                continue;
-
-            if ([object respondsToSelector:selector]) {
+        char returnType[32] = {0};
+        method_getReturnType(method, returnType, sizeof(returnType));
+        if (returnType[0] != '@') {
+            continue;
+        }
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-
-                id value =
-                    [object performSelector:selector];
-
+        id value = ((id (*)(id, SEL))objc_msgSend)(object, selector);
 #pragma clang diagnostic pop
 
-                if ([value isKindOfClass:[NSString class]] &&
-                    [value length] > 0) {
+        if ([value isKindOfClass:[NSString class]] &&
+            [(NSString *)value length] > 0) {
+            return (NSString *)value;
+        }
+    }
 
-                    return value;
-                }
+    return nil;
+}
+
+static NSString *ATRatioSelectedBundleID(UIViewController *controller) {
+    NSMutableArray *queue = [NSMutableArray array];
+    if (controller) {
+        [queue addObject:controller];
+    }
+
+    NSUInteger cursor = 0;
+    NSUInteger visited = 0;
+    while (cursor < queue.count && visited < 128) {
+        id object = queue[cursor++];
+        visited++;
+
+        NSString *bundleID = ATRatioReadBundleIDFromObject(object);
+        if (bundleID.length > 0) {
+            return bundleID;
+        }
+
+        if ([object isKindOfClass:[UIViewController class]]) {
+            UIViewController *vc = object;
+            if (vc.parentViewController) {
+                [queue addObject:vc.parentViewController];
+            }
+            if (vc.presentingViewController) {
+                [queue addObject:vc.presentingViewController];
+            }
+            for (UIViewController *child in vc.childViewControllers) {
+                [queue addObject:child];
             }
         }
     }
@@ -51,368 +100,216 @@ static NSString *ATRGetSelectedBundleID(void) {
     return nil;
 }
 
+#pragma mark - Presentation helpers
 
-static UIViewController *ATTopViewController(void) {
+static void ATRatioPreparePopover(UIAlertController *alert,
+                                  UIViewController *presenter) {
+    UIPopoverPresentationController *popover = alert.popoverPresentationController;
+    if (!popover) {
+        return;
+    }
 
-    UIWindow *window =
-        UIApplication.sharedApplication.keyWindow;
-
-    if (!window)
-        return nil;
-
-    UIViewController *vc =
-        window.rootViewController;
-
-    while (vc.presentedViewController)
-        vc = vc.presentedViewController;
-
-    return vc;
+    UIView *sourceView = presenter.view;
+    popover.sourceView = sourceView;
+    popover.sourceRect = CGRectMake(CGRectGetMidX(sourceView.bounds),
+                                    CGRectGetMidY(sourceView.bounds),
+                                    1.0,
+                                    1.0);
+    popover.permittedArrowDirections = 0;
 }
 
+static void ATRatioShowInvalidInput(UIViewController *presenter) {
+    UIAlertController *alert = [UIAlertController
+        alertControllerWithTitle:@"Giá trị không hợp lệ"
+                         message:@"Chiều rộng và chiều cao phải lớn hơn 0."
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Đóng"
+                                             style:UIAlertActionStyleDefault
+                                           handler:nil]];
+    [presenter presentViewController:alert animated:YES completion:nil];
+}
 
-static void ATRShowCustomRatio(NSString *bundleID) {
+#pragma mark - Ratio dialog
 
-    UIAlertController *alert =
-        [UIAlertController
-            alertControllerWithTitle:@"Tùy chỉnh tỉ lệ màn hình"
-                             message:@"Nhập chiều rộng và chiều cao"
-                      preferredStyle:UIAlertControllerStyleAlert];
+static void ATRatioShowCustomDialog(NSString *bundleID,
+                                    UIViewController *presenter) {
+    UIAlertController *alert = [UIAlertController
+        alertControllerWithTitle:@"Tùy chỉnh tỉ lệ màn hình"
+                         message:@"Nhập chiều rộng và chiều cao"
+                  preferredStyle:UIAlertControllerStyleAlert];
 
     [alert addTextFieldWithConfigurationHandler:^(UITextField *field) {
-
-        field.placeholder = @"Chiều rộng";
-        field.keyboardType =
-            UIKeyboardTypeDecimalPad;
+        field.placeholder = @"Chiều rộng, ví dụ 16";
+        field.keyboardType = UIKeyboardTypeDecimalPad;
     }];
-
     [alert addTextFieldWithConfigurationHandler:^(UITextField *field) {
-
-        field.placeholder = @"Chiều cao";
-        field.keyboardType =
-            UIKeyboardTypeDecimalPad;
+        field.placeholder = @"Chiều cao, ví dụ 9";
+        field.keyboardType = UIKeyboardTypeDecimalPad;
     }];
 
-    [alert addAction:
-        [UIAlertAction
-            actionWithTitle:@"Hủy"
-                     style:UIAlertActionStyleCancel
-                   handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Hủy"
+                                             style:UIAlertActionStyleCancel
+                                           handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Lưu"
+                                             style:UIAlertActionStyleDefault
+                                           handler:^(UIAlertAction *action) {
+        NSString *widthText = [alert.textFields[0].text stringByReplacingOccurrencesOfString:@"," withString:@"."];
+        NSString *heightText = [alert.textFields[1].text stringByReplacingOccurrencesOfString:@"," withString:@"."];
+        CGFloat width = widthText.doubleValue;
+        CGFloat height = heightText.doubleValue;
 
-    [alert addAction:
-        [UIAlertAction
-            actionWithTitle:@"Áp dụng"
-                     style:UIAlertActionStyleDefault
-                   handler:^(UIAlertAction *action) {
-
-        CGFloat width =
-            [alert.textFields[0].text doubleValue];
-
-        CGFloat height =
-            [alert.textFields[1].text doubleValue];
-
-        if (width <= 0.0 || height <= 0.0) {
-
-            UIAlertController *error =
-                [UIAlertController
-                    alertControllerWithTitle:@"Lỗi"
-                                     message:@"Chiều rộng và chiều cao phải lớn hơn 0."
-                              preferredStyle:UIAlertControllerStyleAlert];
-
-            [error addAction:
-                [UIAlertAction
-                    actionWithTitle:@"OK"
-                             style:UIAlertActionStyleDefault
-                           handler:nil]];
-
-            [ATTopViewController()
-                presentViewController:error
-                             animated:YES
-                           completion:nil];
-
+        if (!isfinite(width) || !isfinite(height) || width <= 0.0 || height <= 0.0) {
+            ATRatioShowInvalidInput(presenter);
             return;
         }
 
-        ATRatio ratio =
-            ATRatioMake(width, height);
-
-        [[ATRatioStore sharedStore]
-            setRatio:ratio
-            forBundleID:bundleID];
-
+        [[ATRatioStore sharedStore] setRatio:ATRatioMake(width, height)
+                                 forBundleID:bundleID];
     }]];
 
-    [ATTopViewController()
-        presentViewController:alert
-                     animated:YES
-                   completion:nil];
+    [presenter presentViewController:alert animated:YES completion:nil];
 }
 
-
-static void ATRShowRatioMenu(NSString *bundleID) {
-
-    if (!bundleID.length)
+static void ATRatioShowMenu(NSString *bundleID,
+                            UIViewController *presenter) {
+    if (bundleID.length == 0 || !presenter) {
         return;
-
-    UIAlertController *alert =
-        [UIAlertController
-            alertControllerWithTitle:@"Tỉ lệ màn hình"
-                             message:nil
-                      preferredStyle:UIAlertControllerStyleActionSheet];
-
-    NSArray<NSDictionary *> *items = @[
-        @{
-            @"title": @"Tự động",
-            @"width": @0,
-            @"height": @0
-        },
-
-        @{
-            @"title": @"16:9",
-            @"width": @16,
-            @"height": @9
-        },
-
-        @{
-            @"title": @"4:3",
-            @"width": @4,
-            @"height": @3
-        },
-
-        @{
-            @"title": @"3:2",
-            @"width": @3,
-            @"height": @2
-        },
-
-        @{
-            @"title": @"18:9",
-            @"width": @18,
-            @"height": @9
-        },
-
-        @{
-            @"title": @"19,5:9",
-            @"width": @19.5,
-            @"height": @9
-        },
-
-        @{
-            @"title": @"21:9",
-            @"width": @21,
-            @"height": @9
-        }
-    ];
-
-    for (NSDictionary *item in items) {
-
-        NSString *title =
-            item[@"title"];
-
-        UIAlertAction *action =
-            [UIAlertAction
-                actionWithTitle:title
-                         style:UIAlertActionStyleDefault
-                       handler:^(UIAlertAction *action) {
-
-            CGFloat width =
-                [item[@"width"] doubleValue];
-
-            CGFloat height =
-                [item[@"height"] doubleValue];
-
-            if (width == 0.0 || height == 0.0) {
-
-                [[ATRatioStore sharedStore]
-                    removeRatioForBundleID:bundleID];
-
-                return;
-            }
-
-            ATRatio ratio =
-                ATRatioMake(width, height);
-
-            [[ATRatioStore sharedStore]
-                setRatio:ratio
-                forBundleID:bundleID];
-        }];
-
-        [alert addAction:action];
     }
 
-    [alert addAction:
-        [UIAlertAction
-            actionWithTitle:@"Tùy chỉnh thủ công"
-                     style:UIAlertActionStyleDefault
-                   handler:^(UIAlertAction *action) {
+    UIAlertController *alert = [UIAlertController
+        alertControllerWithTitle:@"Tỉ lệ màn hình"
+                         message:nil
+                  preferredStyle:UIAlertControllerStyleActionSheet];
 
-        ATRShowCustomRatio(bundleID);
+    NSArray<NSDictionary *> *presets = @[
+        @{ @"title": @"16:9",   @"width": @16.0,  @"height": @9.0 },
+        @{ @"title": @"4:3",    @"width": @4.0,   @"height": @3.0 },
+        @{ @"title": @"3:2",    @"width": @3.0,   @"height": @2.0 },
+        @{ @"title": @"18:9",   @"width": @18.0,  @"height": @9.0 },
+        @{ @"title": @"19,5:9", @"width": @19.5,  @"height": @9.0 },
+        @{ @"title": @"21:9",   @"width": @21.0,  @"height": @9.0 }
+    ];
+
+    [alert addAction:[UIAlertAction actionWithTitle:@"Tự động"
+                                             style:UIAlertActionStyleDefault
+                                           handler:^(UIAlertAction *action) {
+        [[ATRatioStore sharedStore] removeRatioForBundleID:bundleID];
     }]];
 
-    [alert addAction:
-        [UIAlertAction
-            actionWithTitle:@"Hủy"
-                     style:UIAlertActionStyleCancel
-                   handler:nil]];
+    for (NSDictionary *preset in presets) {
+        NSString *title = preset[@"title"];
+        CGFloat width = [preset[@"width"] doubleValue];
+        CGFloat height = [preset[@"height"] doubleValue];
 
-    [ATTopViewController()
-        presentViewController:alert
-                     animated:YES
-                   completion:nil];
+        [alert addAction:[UIAlertAction actionWithTitle:title
+                                                 style:UIAlertActionStyleDefault
+                                               handler:^(UIAlertAction *action) {
+            [[ATRatioStore sharedStore] setRatio:ATRatioMake(width, height)
+                                     forBundleID:bundleID];
+        }]];
+    }
+
+    [alert addAction:[UIAlertAction actionWithTitle:@"Tùy chỉnh thủ công"
+                                             style:UIAlertActionStyleDefault
+                                           handler:^(UIAlertAction *action) {
+        ATRatioShowCustomDialog(bundleID, presenter);
+    }]];
+
+    [alert addAction:[UIAlertAction actionWithTitle:@"Hủy"
+                                             style:UIAlertActionStyleCancel
+                                           handler:nil]];
+
+    ATRatioPreparePopover(alert, presenter);
+    [presenter presentViewController:alert animated:YES completion:nil];
 }
 
-#pragma mark - Action item discovery
+#pragma mark - Popup action bar
 
+static UIView *ATRatioFindActionBar(UIView *rootView) {
+    if (!rootView) {
+        return nil;
+    }
 
-static void ATRInstallRatioButton(UIViewController *controller) {
+    NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:rootView];
+    NSUInteger cursor = 0;
+    NSUInteger visited = 0;
 
-    if (!controller)
-        return;
+    while (cursor < queue.count && visited < 2048) {
+        UIView *view = queue[cursor++];
+        visited++;
 
-    UIView *root =
-        controller.view;
-
-    if (!root)
-        return;
-
-    UIView *existing =
-        [root viewWithTag:0xA709];
-
-    if (existing)
-        return;
-
-    /*
-     * Tìm ATActionsBarView.
-     */
-
-    UIView *actionBar = nil;
-
-    NSMutableArray<UIView *> *queue =
-        [NSMutableArray arrayWithObject:root];
-
-    while (queue.count > 0) {
-
-        UIView *view =
-            queue.firstObject;
-
-        [queue removeObjectAtIndex:0];
-
-        NSString *name =
-            NSStringFromClass([view class]);
-
-        if ([name isEqualToString:@"ATActionsBarView"]) {
-
-            actionBar = view;
-            break;
+        if ([NSStringFromClass([view class]) isEqualToString:@"ATActionsBarView"]) {
+            return view;
         }
 
         for (UIView *subview in view.subviews) {
-
             [queue addObject:subview];
         }
     }
 
-    if (!actionBar)
+    return nil;
+}
+
+static void ATRatioInstallButton(ATPopupViewController *controller) {
+    if (!controller.isViewLoaded || !controller.view.window) {
         return;
+    }
 
-    UIButton *button =
-        [UIButton buttonWithType:UIButtonTypeSystem];
+    UIView *actionBar = ATRatioFindActionBar(controller.view);
+    if (!actionBar || [actionBar viewWithTag:kATRatioButtonTag]) {
+        return;
+    }
 
-    button.tag = 0xA709;
-
-    [button setTitle:@"Tỉ lệ màn hình"
-            forState:UIControlStateNormal];
-
-    button.accessibilityLabel =
-        @"Tỉ lệ màn hình";
-
-    button.titleLabel.font =
-        [UIFont systemFontOfSize:14.0
-                           weight:UIFontWeightMedium];
-
+    UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
+    button.tag = kATRatioButtonTag;
+    [button setTitle:@"Tỉ lệ màn hình" forState:UIControlStateNormal];
+    button.accessibilityLabel = @"Tỉ lệ màn hình";
+    button.titleLabel.font = [UIFont systemFontOfSize:13.0 weight:UIFontWeightMedium];
+    button.contentEdgeInsets = UIEdgeInsetsMake(0.0, 8.0, 0.0, 8.0);
     [button addTarget:controller
                action:@selector(atr_ratioButtonPressed:)
      forControlEvents:UIControlEventTouchUpInside];
 
-    /*
-     * Dùng kích thước tự co giãn.
-     */
-
     button.translatesAutoresizingMaskIntoConstraints = NO;
-
     [actionBar addSubview:button];
 
     [NSLayoutConstraint activateConstraints:@[
-        [button.heightAnchor
-            constraintEqualToAnchor:actionBar.heightAnchor],
-
-        [button.widthAnchor
-            constraintGreaterThanOrEqualToConstant:110.0],
-
-        [button.trailingAnchor
-            constraintEqualToAnchor:actionBar.trailingAnchor
-                           constant:-8.0],
-
-        [button.centerYAnchor
-            constraintEqualToAnchor:actionBar.centerYAnchor]
+        [button.trailingAnchor constraintEqualToAnchor:actionBar.trailingAnchor constant:-6.0],
+        [button.centerYAnchor constraintEqualToAnchor:actionBar.centerYAnchor],
+        [button.heightAnchor constraintLessThanOrEqualToAnchor:actionBar.heightAnchor constant:-4.0],
+        [button.widthAnchor constraintGreaterThanOrEqualToConstant:100.0]
     ]];
 }
 
-#pragma mark - UIViewController
+#pragma mark - Narrow hook: AppTools popup only
 
-%hook UIViewController
+%hook ATPopupViewController
 
 - (void)viewDidAppear:(BOOL)animated {
-
     %orig;
 
-    NSString *className =
-        NSStringFromClass([self class]);
-
-    /*
-     * Chỉ hoạt động với các controller thuộc
-     * giao diện AppTools/action sheet.
-     */
-
-    if ([className containsString:@"ATAction"] ||
-        [className containsString:@"ATPopup"] ||
-        [className containsString:@"AppTool"]) {
-
-        dispatch_async(dispatch_get_main_queue(), ^{
-
-            ATRInstallRatioButton(self);
-        });
-    }
+    dispatch_async(dispatch_get_main_queue(), ^{
+        ATRatioInstallButton((ATPopupViewController *)self);
+    });
 }
 
 %new
-
 - (void)atr_ratioButtonPressed:(id)sender {
-
-    NSString *bundleID =
-        ATRGetSelectedBundleID();
-
-    if (!bundleID.length) {
-
-        UIAlertController *error =
-            [UIAlertController
-                alertControllerWithTitle:@"Không xác định được ứng dụng"
-                                 message:@"Không lấy được Bundle ID của ứng dụng đang chọn."
-                          preferredStyle:UIAlertControllerStyleAlert];
-
-        [error addAction:
-            [UIAlertAction
-                actionWithTitle:@"OK"
-                         style:UIAlertActionStyleDefault
-                       handler:nil]];
-
-        [self presentViewController:error
-                           animated:YES
-                         completion:nil];
-
+    NSString *bundleID = ATRatioSelectedBundleID(self);
+    if (bundleID.length == 0) {
+        UIAlertController *alert = [UIAlertController
+            alertControllerWithTitle:@"Không xác định được ứng dụng"
+                             message:@"AppTools chưa cung cấp Bundle ID của ứng dụng đang chọn cho cửa sổ này."
+                      preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"Đóng"
+                                                 style:UIAlertActionStyleDefault
+                                               handler:nil]];
+        [self presentViewController:alert animated:YES completion:nil];
         return;
     }
 
-    ATRShowRatioMenu(bundleID);
+    UIViewController *presenter = ATRatioTopController(self);
+    ATRatioShowMenu(bundleID, presenter);
 }
 
 %end
