@@ -65,14 +65,19 @@ static UIImage *ATRatioCreateIcon(void) {
 #pragma mark - Popup lookup and ratio menu
 
 static ATPopupViewController *ATRatioPopupForBar(ATActionsBarView *bar) {
+    Class popupClass = objc_getClass("ATPopupViewController");
+
     UIResponder *responder = bar;
     NSUInteger depth = 0;
+
     while (responder && depth++ < 80) {
-        if ([responder isKindOfClass:[ATPopupViewController class]]) {
+        if (popupClass && [responder isKindOfClass:popupClass]) {
             return (ATPopupViewController *)responder;
         }
+
         responder = responder.nextResponder;
     }
+
     return gATCurrentPopup;
 }
 
