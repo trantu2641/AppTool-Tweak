@@ -4,7 +4,6 @@
 
 #import "RatioStore.h"
 
-/* AppTools 2.9.0 private interfaces confirmed from AppTool.dylib metadata. */
 @interface ATActionsBarView : UIView
 @property(nonatomic, copy) NSString *rowStorageKey;
 @property(nonatomic, copy) NSArray *itemTitles;
@@ -20,7 +19,6 @@
                    image:(UIImage *)image
                  handler:(void (^)(void))handler;
 - (void)finishAddingItems;
-- (void)buttonTouchUpInside:(id)sender;
 @end
 
 @interface ATPopupViewController : UIViewController
@@ -28,21 +26,114 @@
 - (ATActionsBarView *)liveActionsBarWithRowStorageKey:(NSString *)rowStorageKey;
 @end
 
-static NSString * const kATRatioRowKey = @"ATBarLayout_app_row2";
 static NSString * const kATRatioTitle = @"Tỉ lệ màn hình";
-static char kATRatioRowKeyAssociation;
 static char kATRatioPopupAssociation;
-static char kATRatioItemCountAssociation;
-static char kATRatioDidReplaceAssociation;
 static char kATRatioApplyingAssociation;
-static char kATRatioDidRebuildAssociation;
+static __weak ATPopupViewController *gATRatioVisiblePopup = nil;
 
-/* Context set while AppTools builds a row. */
-static ATPopupViewController *gATRatioBuildingPopup = nil;
-static NSString *gATRatioBuildingRowKey = nil;
-static ATPopupViewController *gATRatioVisiblePopup = nil;
+#pragma mark - Exact source-tile identification
 
-#pragma mark - Icon
+static NSString *ATRatioFoldTitle(NSString *title) {
+    if (![title isKindOfClass:[NSString class]]) return @"";
+    NSString *folded = [title stringByFoldingWithOptions:(NSDiacriticInsensitiveSearch | NSWidthInsensitiveSearch)
+                                                   locale:[NSLocale localeWithLocaleIdentifier:@"en_US"]];
+    return [[folded stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] lowercaseString];
+}
+
+/*
+ * Do not select by row index. AppTools can reuse action-bar instances for
+ * different layouts, which caused the old index-0 hook to rename Ghim chạy nền.
+ * Match only the notification tile's own title, independent of its position.
+ */
+static BOOL ATRatioIsNotificationTileTitle(NSString *title) {
+    NSString *value = ATRatioFoldTitle(title);
+    if (value.length == 0) return NO;
+
+    return [value isEqualToString:@"thong bao tin nhan"] ||
+           [value isEqualToString:@"message notification"] ||
+           [value isEqualToString:@"notification message"] ||
+           [value isEqualToString:@"disable message notification"] ||
+           [value isEqualToString:@"disable notification"] ||
+           [value isEqualToString:@"disablenotification"];
+}
+
+/*
+ * Secondary identity check using AppTools' own DisableNotification artwork.
+ * This lets the patch identify the same tile if the displayed title is
+ * localized differently, while still leaving AllowBackground/Ghim chạy nền
+ * completely untouched.
+ */
+static BOOL ATRatioImageMatchesNotificationIcon(UIImage *candidate) {
+    if (!candidate) return NO;
+    static NSArray<NSData *> *referencePNG = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSMutableArray<NSData *> *images = [NSMutableArray array];
+        NSBundle *bundle = [NSBundle bundleWithIdentifier:@"com.flex2areo.apptools"];
+        if (!bundle) {
+            for (NSBundle *loaded in NSBundle.allBundles) {
+                if ([loaded.bundleIdentifier isEqualToString:@"com.flex2areo.apptools"]) {
+                    bundle = loaded;
+                    break;
+                }
+            }
+        }
+        for (NSString *theme in @[@"Theme_New", @"Theme_Old"]) {
+            NSString *path = [bundle pathForResource:@"DisableNotification"
+                                              ofType:@"png"
+                                         inDirectory:theme];
+            UIImage *reference = path ? [UIImage imageWithContentsOfFile:path] : nil;
+            NSData *data = reference ? UIImagePNGRepresentation(reference) : nil;
+            if (data) [images addObject:data];
+        }
+        referencePNG = [images copy];
+    });
+
+    NSData *candidateData = UIImagePNGRepresentation(candidate);
+    if (!candidateData) return NO;
+    for (NSData *referenceData in referencePNG) {
+        if ([candidateData isEqualToData:referenceData]) return YES;
+    }
+    return NO;
+}
+
+static BOOL ATRatioIsNotificationTile(NSString *title, UIImage *image) {
+    return ATRatioIsNotificationTileTitle(title) || ATRatioImageMatchesNotificationIcon(image);
+}
+
+#pragma mark - AppTools popup lookup
+
+static ATPopupViewController *ATRatioPopupForBar(ATActionsBarView *bar) {
+    Class popupClass = objc_getClass("ATPopupViewController");
+    UIResponder *responder = bar;
+    NSUInteger depth = 0;
+
+    while (responder && depth++ < 80) {
+        if (popupClass && [responder isKindOfClass:popupClass]) {
+            return (ATPopupViewController *)responder;
+        }
+        responder = responder.nextResponder;
+    }
+
+    NSValue *stored = objc_getAssociatedObject(bar, &kATRatioPopupAssociation);
+    id popup = stored ? [stored nonretainedObjectValue] : nil;
+    if (popupClass && [popup isKindOfClass:popupClass]) {
+        return (ATPopupViewController *)popup;
+    }
+
+    return gATRatioVisiblePopup;
+}
+
+static UIViewController *ATRatioTopController(UIViewController *controller) {
+    UIViewController *current = controller;
+    NSUInteger depth = 0;
+    while (current.presentedViewController && depth++ < 20) {
+        current = current.presentedViewController;
+    }
+    return current;
+}
+
+#pragma mark - Ratio menu
 
 static UIImage *ATRatioCreateIcon(void) {
     CGSize size = CGSizeMake(64.0, 64.0);
@@ -79,97 +170,7 @@ static UIImage *ATRatioCreateIcon(void) {
     return [image imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal];
 }
 
-#pragma mark - Popup lookup
-
-static ATPopupViewController *ATRatioPopupForBar(ATActionsBarView *bar) {
-    Class popupClass = objc_getClass("ATPopupViewController");
-    UIResponder *responder = bar;
-    NSUInteger depth = 0;
-    while (responder && depth++ < 80) {
-        if (popupClass && [responder isKindOfClass:popupClass]) {
-            return (ATPopupViewController *)responder;
-        }
-        responder = responder.nextResponder;
-    }
-
-    NSValue *stored = objc_getAssociatedObject(bar, &kATRatioPopupAssociation);
-    id popup = stored ? [stored nonretainedObjectValue] : nil;
-    if (popupClass && [popup isKindOfClass:popupClass]) {
-        return (ATPopupViewController *)popup;
-    }
-    return gATRatioVisiblePopup ?: gATRatioBuildingPopup;
-}
-
-static UIViewController *ATRatioTopController(UIViewController *controller) {
-    UIViewController *current = controller;
-    while (current.presentedViewController) {
-        current = current.presentedViewController;
-    }
-    return current;
-}
-
-/*
- * AppTools stores the original notification callback in its button model.
- * Changing the visible title does not guarantee that an already-created
- * UIButton stops dispatching that original callback. Read the visible title
- * from the actual touch sender so buttonTouchUpInside: can intercept it.
- */
-static BOOL ATRatioViewContainsTitle(UIView *view, NSUInteger depth) {
-    if (!view || depth > 8) return NO;
-
-    if ([view.accessibilityLabel isKindOfClass:[NSString class]] &&
-        [view.accessibilityLabel isEqualToString:kATRatioTitle]) {
-        return YES;
-    }
-
-    if ([view isKindOfClass:[UIButton class]]) {
-        UIButton *button = (UIButton *)view;
-        NSString *normalTitle = [button titleForState:UIControlStateNormal];
-        NSString *labelTitle = button.titleLabel.text;
-        NSString *accessibilityTitle = button.accessibilityLabel;
-        if ([normalTitle isEqualToString:kATRatioTitle] ||
-            [labelTitle isEqualToString:kATRatioTitle] ||
-            [accessibilityTitle isEqualToString:kATRatioTitle]) {
-            return YES;
-        }
-    }
-
-    if ([view isKindOfClass:[UILabel class]]) {
-        UILabel *label = (UILabel *)view;
-        if ([label.text isEqualToString:kATRatioTitle] ||
-            [label.attributedText.string isEqualToString:kATRatioTitle]) {
-            return YES;
-        }
-    }
-
-    for (UIView *child in view.subviews) {
-        if (ATRatioViewContainsTitle(child, depth + 1)) return YES;
-    }
-    return NO;
-}
-
-static BOOL ATRatioSenderIsRatioTile(id sender) {
-    if (!sender) return NO;
-
-    /* Some AppTools builds associate the ATActionBarItem directly to sender. */
-    if ([sender respondsToSelector:@selector(title)]) {
-        @try {
-            id value = [sender valueForKey:@"title"];
-            if ([value isKindOfClass:[NSString class]] && [value isEqualToString:kATRatioTitle]) {
-                return YES;
-            }
-        } @catch (__unused NSException *exception) {
-        }
-    }
-
-    return [sender isKindOfClass:[UIView class]] &&
-           ATRatioViewContainsTitle((UIView *)sender, 0);
-}
-
-#pragma mark - Ratio menu
-
-static void ATRatioConfigurePopover(UIAlertController *alert,
-                                    UIViewController *presenter) {
+static void ATRatioConfigurePopover(UIAlertController *alert, UIViewController *presenter) {
     UIPopoverPresentationController *popover = alert.popoverPresentationController;
     if (!popover || !presenter.isViewLoaded) return;
     popover.sourceView = presenter.view;
@@ -180,8 +181,7 @@ static void ATRatioConfigurePopover(UIAlertController *alert,
 
 static void ATRatioShowMenu(NSString *bundleID, UIViewController *presenter);
 
-static void ATRatioShowCustomInput(NSString *bundleID,
-                                   UIViewController *presenter) {
+static void ATRatioShowCustomInput(NSString *bundleID, UIViewController *presenter) {
     UIAlertController *alert = [UIAlertController
         alertControllerWithTitle:@"Tùy chỉnh tỉ lệ màn hình"
                          message:@"Nhập chiều rộng và chiều cao"
@@ -196,42 +196,35 @@ static void ATRatioShowCustomInput(NSString *bundleID,
         field.keyboardType = UIKeyboardTypeDecimalPad;
     }];
 
-    [alert addAction:[UIAlertAction actionWithTitle:@"Hủy"
-                                             style:UIAlertActionStyleCancel
-                                           handler:nil]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Lưu"
-                                             style:UIAlertActionStyleDefault
-                                           handler:^(UIAlertAction *action) {
-        NSString *widthText = [alert.textFields[0].text
-            stringByReplacingOccurrencesOfString:@"," withString:@"."];
-        NSString *heightText = [alert.textFields[1].text
-            stringByReplacingOccurrencesOfString:@"," withString:@"."];
-        CGFloat width = widthText.doubleValue;
-        CGFloat height = heightText.doubleValue;
+    [alert addAction:[UIAlertAction actionWithTitle:@"Hủy" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Lưu" style:UIAlertActionStyleDefault
+        handler:^(UIAlertAction *action) {
+            NSString *widthText = [alert.textFields[0].text
+                stringByReplacingOccurrencesOfString:@"," withString:@"."];
+            NSString *heightText = [alert.textFields[1].text
+                stringByReplacingOccurrencesOfString:@"," withString:@"."];
+            CGFloat width = widthText.doubleValue;
+            CGFloat height = heightText.doubleValue;
 
-        if (!isfinite(width) || !isfinite(height) || width <= 0.0 || height <= 0.0) {
-            UIAlertController *error = [UIAlertController
-                alertControllerWithTitle:@"Giá trị không hợp lệ"
-                                 message:@"Chiều rộng và chiều cao phải là số lớn hơn 0."
-                          preferredStyle:UIAlertControllerStyleAlert];
-            [error addAction:[UIAlertAction actionWithTitle:@"Đóng"
-                                                     style:UIAlertActionStyleDefault
-                                                   handler:nil]];
-            [presenter presentViewController:error animated:YES completion:nil];
-            return;
-        }
+            if (!isfinite(width) || !isfinite(height) || width <= 0.0 || height <= 0.0) {
+                UIAlertController *error = [UIAlertController
+                    alertControllerWithTitle:@"Giá trị không hợp lệ"
+                                     message:@"Chiều rộng và chiều cao phải là số lớn hơn 0."
+                              preferredStyle:UIAlertControllerStyleAlert];
+                [error addAction:[UIAlertAction actionWithTitle:@"Đóng" style:UIAlertActionStyleDefault handler:nil]];
+                [presenter presentViewController:error animated:YES completion:nil];
+                return;
+            }
 
-        [[ATRatioStore sharedStore]
-            setRatio:ATRatioMake(width, height)
-            forBundleID:bundleID];
-    }]];
+            [[ATRatioStore sharedStore] setRatio:ATRatioMake(width, height) forBundleID:bundleID];
+        }]];
 
     [presenter presentViewController:alert animated:YES completion:nil];
 }
 
 static void ATRatioShowMenu(NSString *bundleID, UIViewController *presenter) {
-    if (bundleID.length == 0 || !presenter) {
-        NSLog(@"[AppToolsRatio] Cannot show ratio menu: missing Bundle ID or presenter");
+    if (![bundleID isKindOfClass:[NSString class]] || bundleID.length == 0 || !presenter) {
+        NSLog(@"[AppToolsRatio] Cannot show ratio menu: missing selected app Bundle ID or presenter");
         return;
     }
 
@@ -240,11 +233,10 @@ static void ATRatioShowMenu(NSString *bundleID, UIViewController *presenter) {
                          message:[NSString stringWithFormat:@"Ứng dụng: %@", bundleID]
                   preferredStyle:UIAlertControllerStyleActionSheet];
 
-    [alert addAction:[UIAlertAction actionWithTitle:@"Tự động"
-                                             style:UIAlertActionStyleDefault
-                                           handler:^(UIAlertAction *action) {
-        [[ATRatioStore sharedStore] removeRatioForBundleID:bundleID];
-    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Tự động" style:UIAlertActionStyleDefault
+        handler:^(UIAlertAction *action) {
+            [[ATRatioStore sharedStore] removeRatioForBundleID:bundleID];
+        }]];
 
     NSArray<NSDictionary *> *presets = @[
         @{ @"title": @"16:9",   @"width": @16.0,  @"height": @9.0 },
@@ -259,129 +251,110 @@ static void ATRatioShowMenu(NSString *bundleID, UIViewController *presenter) {
         NSString *title = preset[@"title"];
         CGFloat width = [preset[@"width"] doubleValue];
         CGFloat height = [preset[@"height"] doubleValue];
-        [alert addAction:[UIAlertAction actionWithTitle:title
-                                                 style:UIAlertActionStyleDefault
-                                               handler:^(UIAlertAction *action) {
-            [[ATRatioStore sharedStore]
-                setRatio:ATRatioMake(width, height)
-                forBundleID:bundleID];
-        }]];
+        [alert addAction:[UIAlertAction actionWithTitle:title style:UIAlertActionStyleDefault
+            handler:^(UIAlertAction *action) {
+                [[ATRatioStore sharedStore] setRatio:ATRatioMake(width, height) forBundleID:bundleID];
+            }]];
     }
 
-    [alert addAction:[UIAlertAction actionWithTitle:@"Tùy chỉnh thủ công"
-                                             style:UIAlertActionStyleDefault
-                                           handler:^(UIAlertAction *action) {
-        ATRatioShowCustomInput(bundleID, presenter);
-    }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Hủy"
-                                             style:UIAlertActionStyleCancel
-                                           handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Tùy chỉnh thủ công" style:UIAlertActionStyleDefault
+        handler:^(UIAlertAction *action) {
+            ATRatioShowCustomInput(bundleID, presenter);
+        }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Hủy" style:UIAlertActionStyleCancel handler:nil]];
 
     ATRatioConfigurePopover(alert, presenter);
     [presenter presentViewController:alert animated:YES completion:nil];
 }
 
+#pragma mark - Replacement action
 
-#pragma mark - Registered item replacement fallback
-
-static BOOL ATRatioReplaceRegisteredTile(ATActionsBarView *bar,
-                                         ATPopupViewController *popup,
-                                         BOOL rebuildIfNeeded) {
-    if (!bar) return NO;
-
-    NSString *rowKey = bar.rowStorageKey;
-    if (rowKey.length == 0) rowKey = objc_getAssociatedObject(bar, &kATRatioRowKeyAssociation);
-    if (![rowKey isEqualToString:kATRatioRowKey]) return NO;
-    if ([objc_getAssociatedObject(bar, &kATRatioApplyingAssociation) boolValue]) return NO;
-
-    NSArray *titles = bar.itemTitles;
-    NSArray *currentImages = bar.itemImages;
-    NSArray *currentHandlers = bar.itemHandlers;
-    if (titles.count == 0 || currentImages.count < titles.count || currentHandlers.count < titles.count) {
-        NSLog(@"[AppToolsRatio] app_row2 models not ready: titles=%lu images=%lu handlers=%lu",
-              (unsigned long)titles.count, (unsigned long)currentImages.count,
-              (unsigned long)currentHandlers.count);
-        return NO;
-    }
-
-    NSUInteger targetIndex = 0;
-    NSString *oldTitle = [titles[targetIndex] isKindOfClass:[NSString class]]
-        ? titles[targetIndex] : @"";
-    if ([oldTitle isEqualToString:kATRatioTitle]) {
-        objc_setAssociatedObject(bar, &kATRatioDidReplaceAssociation,
-                                 @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        if (rebuildIfNeeded &&
-            ![objc_getAssociatedObject(bar, &kATRatioDidRebuildAssociation) boolValue]) {
-            objc_setAssociatedObject(bar, &kATRatioApplyingAssociation,
-                                     @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            [bar rebuildArrangedSubviews];
-            objc_setAssociatedObject(bar, &kATRatioApplyingAssociation,
-                                     nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            objc_setAssociatedObject(bar, &kATRatioDidRebuildAssociation,
-                                     @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        }
-        return NO;
-    }
-
-    if (!popup) popup = ATRatioPopupForBar(bar);
-    if (!popup) popup = gATRatioVisiblePopup ?: gATRatioBuildingPopup;
-    NSString *bundleIDAtCreation = [popup.bundleID copy];
-    __weak ATPopupViewController *weakPopup = popup;
+static void (^ATRatioMakeTileHandler(ATActionsBarView *bar,
+                                     ATPopupViewController *popup,
+                                     NSString *bundleAtCreation))(void) {
     __weak ATActionsBarView *weakBar = bar;
+    __weak ATPopupViewController *weakPopup = popup;
+    NSString *capturedBundleID = [bundleAtCreation copy];
 
-    void (^ratioHandler)(void) = ^{
-        ATPopupViewController *activePopup = weakPopup;
-        if (!activePopup) activePopup = ATRatioPopupForBar(weakBar);
-        if (!activePopup) activePopup = gATRatioVisiblePopup;
-        NSString *bundleID = activePopup.bundleID;
-        if (![bundleID isKindOfClass:[NSString class]] || bundleID.length == 0) {
-            bundleID = bundleIDAtCreation;
-        }
-        if (!activePopup || bundleID.length == 0) {
-            NSLog(@"[AppToolsRatio] Tỉ lệ button tapped, but no selected app Bundle ID");
-            return;
-        }
-        ATRatioShowMenu(bundleID, ATRatioTopController(activePopup));
-    };
+    return [^{
+        dispatch_async(dispatch_get_main_queue(), ^{
+            ATPopupViewController *activePopup = weakPopup;
+            if (!activePopup) activePopup = ATRatioPopupForBar(weakBar);
+            if (!activePopup) activePopup = gATRatioVisiblePopup;
 
-    NSMutableArray *images = [currentImages mutableCopy];
-    NSMutableArray *handlers = [currentHandlers mutableCopy];
-    if (targetIndex >= images.count || targetIndex >= handlers.count) return NO;
+            NSString *bundleID = [activePopup.bundleID copy];
+            if (bundleID.length == 0) bundleID = capturedBundleID;
+            if (bundleID.length == 0 || !activePopup) {
+                NSLog(@"[AppToolsRatio] Ratio tile tapped, but selected app Bundle ID is unavailable");
+                return;
+            }
 
-    objc_setAssociatedObject(bar, &kATRatioApplyingAssociation,
-                             @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-
-    /* The screenshot identifies this exact cell as the first tile in app_row2. */
-    [bar setTitle:kATRatioTitle forItemAtIndex:(NSInteger)targetIndex];
-    [bar setDetail:@"" forItemAtIndex:(NSInteger)targetIndex];
-    images[targetIndex] = ATRatioCreateIcon() ?: images[targetIndex];
-    handlers[targetIndex] = [ratioHandler copy];
-    [bar setItemImages:images];
-    [bar setItemHandlers:handlers];
-
-    objc_setAssociatedObject(bar, &kATRatioDidReplaceAssociation,
-                             @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    NSLog(@"[AppToolsRatio] Replaced existing app_row2[0] '%@' with '%@' (bundle=%@)",
-          oldTitle, kATRatioTitle, bundleIDAtCreation ?: @"<not-set-yet>");
-
-    if (rebuildIfNeeded) {
-        /* The applying flag makes the rebuild hook pass straight to %orig. */
-        [bar rebuildArrangedSubviews];
-        objc_setAssociatedObject(bar, &kATRatioDidRebuildAssociation,
-                                 @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    }
-    objc_setAssociatedObject(bar, &kATRatioApplyingAssociation,
-                             nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    return YES;
+            UIViewController *presenter = ATRatioTopController(activePopup);
+            if (!presenter.viewIfLoaded.window && gATRatioVisiblePopup) {
+                presenter = ATRatioTopController(gATRatioVisiblePopup);
+            }
+            NSLog(@"[AppToolsRatio] Ratio tile action opened for %@", bundleID);
+            ATRatioShowMenu(bundleID, presenter);
+        });
+    } copy];
 }
 
-#pragma mark - Replace the notification tile inside AppTools' own panel
+static BOOL ATRatioReplaceRegisteredNotificationTile(ATActionsBarView *bar) {
+    if (!bar || [objc_getAssociatedObject(bar, &kATRatioApplyingAssociation) boolValue]) return NO;
 
-%group ATRatioCreateTimeUI
+    NSArray *titles = bar.itemTitles;
+    NSArray *oldImages = bar.itemImages;
+    NSArray *oldHandlers = bar.itemHandlers;
+    if (![titles isKindOfClass:[NSArray class]]) return NO;
+
+    for (NSUInteger index = 0; index < titles.count; index++) {
+        NSString *title = [titles[index] isKindOfClass:[NSString class]] ? titles[index] : nil;
+        UIImage *candidateImage = index < oldImages.count && [oldImages[index] isKindOfClass:[UIImage class]]
+            ? oldImages[index] : nil;
+        if (!ATRatioIsNotificationTile(title, candidateImage)) continue;
+
+        if (index >= oldImages.count || index >= oldHandlers.count) {
+            NSLog(@"[AppToolsRatio] Found notification title at %lu, but image/handler arrays are not aligned",
+                  (unsigned long)index);
+            return NO;
+        }
+
+        ATPopupViewController *popup = ATRatioPopupForBar(bar);
+        NSString *bundleID = [popup.bundleID copy];
+        void (^ratioHandler)(void) = ATRatioMakeTileHandler(bar, popup, bundleID);
+
+        NSMutableArray *images = [oldImages mutableCopy];
+        NSMutableArray *handlers = [oldHandlers mutableCopy];
+        images[index] = ATRatioCreateIcon() ?: images[index];
+        handlers[index] = [ratioHandler copy];
+
+        objc_setAssociatedObject(bar, &kATRatioApplyingAssociation, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [bar setTitle:kATRatioTitle forItemAtIndex:(NSInteger)index];
+        [bar setDetail:@"" forItemAtIndex:(NSInteger)index];
+        [bar setItemImages:images];
+        [bar setItemHandlers:handlers];
+        objc_setAssociatedObject(bar, &kATRatioApplyingAssociation, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+        NSLog(@"[AppToolsRatio] Replaced exact notification tile at index %lu in row %@ (bundle=%@)",
+              (unsigned long)index, bar.rowStorageKey ?: @"<unknown>", bundleID ?: @"<not-ready>");
+        return YES;
+    }
+
+    return NO;
+}
+
+#pragma mark - AppTools hooks
+
+%group ATRatioExactNotificationTile
 
 %hook ATPopupViewController
 
 - (void)viewDidLoad {
+    %orig;
+    gATRatioVisiblePopup = (ATPopupViewController *)self;
+}
+
+- (void)viewWillAppear:(BOOL)animated {
     %orig;
     gATRatioVisiblePopup = (ATPopupViewController *)self;
 }
@@ -393,47 +366,16 @@ static BOOL ATRatioReplaceRegisteredTile(ATActionsBarView *bar,
     }
 }
 
-- (void)viewDidLayoutSubviews {
-    %orig;
-
-    /*
-     * This is the panel that contains the feature grid shown in the user's
-     * screenshot. Ask AppTools for its real app_row2 bar after layout, rather
-     * than assuming the bar was populated during liveActionsBar... itself.
-     */
-    gATRatioVisiblePopup = (ATPopupViewController *)self;
-    ATActionsBarView *bar = [self liveActionsBarWithRowStorageKey:kATRatioRowKey];
-    if (bar) {
-        objc_setAssociatedObject(bar, &kATRatioRowKeyAssociation,
-                                 kATRatioRowKey, OBJC_ASSOCIATION_COPY_NONATOMIC);
-        objc_setAssociatedObject(bar, &kATRatioPopupAssociation,
-                                 [NSValue valueWithNonretainedObject:self],
-                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        ATRatioReplaceRegisteredTile(bar, (ATPopupViewController *)self, YES);
-    }
-}
-
 - (ATActionsBarView *)liveActionsBarWithRowStorageKey:(NSString *)rowStorageKey {
-    ATPopupViewController *previousPopup = gATRatioBuildingPopup;
-    NSString *previousRowKey = gATRatioBuildingRowKey;
-    gATRatioBuildingPopup = (ATPopupViewController *)self;
-    gATRatioBuildingRowKey = [rowStorageKey copy];
-
     ATActionsBarView *bar = %orig;
     if (bar) {
-        objc_setAssociatedObject(bar, &kATRatioRowKeyAssociation,
-                                 rowStorageKey, OBJC_ASSOCIATION_COPY_NONATOMIC);
         objc_setAssociatedObject(bar, &kATRatioPopupAssociation,
-                                 [NSValue valueWithNonretainedObject:self],
-                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        if ([rowStorageKey isEqualToString:kATRatioRowKey]) {
-            NSLog(@"[AppToolsRatio] AppTools returned app_row2 bar for %@", self.bundleID);
-            ATRatioReplaceRegisteredTile(bar, (ATPopupViewController *)self, NO);
+            [NSValue valueWithNonretainedObject:self], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        /* No forced row-key assignment and no tile-index assumptions. */
+        if ([rowStorageKey isKindOfClass:[NSString class]]) {
+            NSLog(@"[AppToolsRatio] Captured AppTools action bar %@ for %@", rowStorageKey, self.bundleID);
         }
     }
-
-    gATRatioBuildingPopup = previousPopup;
-    gATRatioBuildingRowKey = previousRowKey;
     return bar;
 }
 
@@ -442,139 +384,41 @@ static BOOL ATRatioReplaceRegisteredTile(ATActionsBarView *bar,
 %hook ATActionsBarView
 
 /*
- * Definitive action override.
- * The original notification handler may already be attached to the UIButton
- * before the title/model arrays are patched. Intercept the actual tap here
- * and return WITHOUT calling %orig, so the message-notification toggle can
- * never run from the renamed tile.
- */
-- (void)buttonTouchUpInside:(id)sender {
-    if (ATRatioSenderIsRatioTile(sender)) {
-        ATActionsBarView *bar = (ATActionsBarView *)self;
-        ATPopupViewController *popup = ATRatioPopupForBar(bar);
-        if (!popup) popup = gATRatioVisiblePopup ?: gATRatioBuildingPopup;
-
-        NSString *bundleID = [popup.bundleID copy];
-        if (![bundleID isKindOfClass:[NSString class]] || bundleID.length == 0) {
-            NSLog(@"[AppToolsRatio] Tỉ lệ màn hình tapped, but popup Bundle ID is unavailable; old notification action blocked");
-            return;
-        }
-
-        NSLog(@"[AppToolsRatio] Intercepted Tỉ lệ màn hình tap for %@; suppressing original notification handler", bundleID);
-        ATRatioShowMenu(bundleID, ATRatioTopController(popup));
-        return;
-    }
-
-    %orig(sender);
-}
-
-- (void)setRowStorageKey:(NSString *)rowStorageKey {
-    %orig;
-    objc_setAssociatedObject(self, &kATRatioRowKeyAssociation,
-                             rowStorageKey, OBJC_ASSOCIATION_COPY_NONATOMIC);
-    objc_setAssociatedObject(self, &kATRatioItemCountAssociation,
-                             @0, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    if (gATRatioBuildingPopup) {
-        objc_setAssociatedObject(self, &kATRatioPopupAssociation,
-                                 [NSValue valueWithNonretainedObject:gATRatioBuildingPopup],
-                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    }
-    if ([rowStorageKey isEqualToString:kATRatioRowKey]) {
-        NSLog(@"[AppToolsRatio] AppTools assigned app_row2 to %@", self);
-    }
-}
-
-/*
- * First chance: replace the arguments before AppTools stores/builds the tile.
+ * Critical path: substitute the callback before AppTools stores it in its
+ * action-bar model. The original notification handler is never passed to %orig.
+ * Only the exact notification title is eligible; Ghim chạy nền is untouched.
  */
 - (void)addItemWithTitle:(NSString *)title
                   detail:(NSString *)detail
                    image:(UIImage *)image
                  handler:(void (^)(void))handler {
-    NSString *rowKey = self.rowStorageKey;
-    if (rowKey.length == 0) {
-        rowKey = objc_getAssociatedObject(self, &kATRatioRowKeyAssociation);
-    }
-    if (rowKey.length == 0 && gATRatioBuildingRowKey.length > 0) {
-        rowKey = gATRatioBuildingRowKey;
-    }
-
-    NSNumber *counter = objc_getAssociatedObject(self, &kATRatioItemCountAssociation);
-    NSUInteger registeredIndex = counter ? counter.unsignedIntegerValue : 0;
-    NSUInteger titlesIndex = self.itemTitles.count;
-    NSUInteger itemIndex = MAX(registeredIndex, titlesIndex);
-    objc_setAssociatedObject(self, &kATRatioItemCountAssociation,
-                             @(itemIndex + 1), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-
-    if (![rowKey isEqualToString:kATRatioRowKey]) {
-        %orig(title, detail, image, handler);
-        return;
-    }
-
-    NSLog(@"[AppToolsRatio] app_row2 addItem[%lu]: %@",
-          (unsigned long)itemIndex, title);
-
-    if (itemIndex == 0 &&
-        ![title isEqualToString:kATRatioTitle] &&
-        ![objc_getAssociatedObject(self, &kATRatioDidReplaceAssociation) boolValue]) {
-        ATActionsBarView *bar = (ATActionsBarView *)self;
-        ATPopupViewController *popup = ATRatioPopupForBar(bar);
-        if (!popup) popup = gATRatioBuildingPopup ?: gATRatioVisiblePopup;
-        NSString *bundleIDAtCreation = [popup.bundleID copy];
-        __weak ATPopupViewController *weakPopup = popup;
-        __weak ATActionsBarView *weakBar = bar;
-
-        void (^ratioHandler)(void) = ^{
-            ATPopupViewController *activePopup = weakPopup;
-            if (!activePopup) activePopup = ATRatioPopupForBar(weakBar);
-            if (!activePopup) activePopup = gATRatioVisiblePopup;
-            NSString *bundleID = activePopup.bundleID;
-            if (![bundleID isKindOfClass:[NSString class]] || bundleID.length == 0) {
-                bundleID = bundleIDAtCreation;
-            }
-            if (!activePopup || bundleID.length == 0) {
-                NSLog(@"[AppToolsRatio] Tile tapped, but active app Bundle ID is unavailable");
-                return;
-            }
-            ATRatioShowMenu(bundleID, ATRatioTopController(activePopup));
-        };
-
-        NSLog(@"[AppToolsRatio] Replacing app_row2[0] '%@' with '%@' at creation",
-              title, kATRatioTitle);
+    if (ATRatioIsNotificationTile(title, image)) {
+        ATPopupViewController *popup = ATRatioPopupForBar((ATActionsBarView *)self);
+        NSString *bundleID = [popup.bundleID copy];
+        void (^ratioHandler)(void) = ATRatioMakeTileHandler((ATActionsBarView *)self, popup, bundleID);
+        NSLog(@"[AppToolsRatio] Matched notification tile title '%@'; replacing title and handler", title);
         %orig(kATRatioTitle, @"", ATRatioCreateIcon() ?: image, ratioHandler);
-        objc_setAssociatedObject(self, &kATRatioDidReplaceAssociation,
-                                 @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         return;
     }
 
     %orig(title, detail, image, handler);
 }
 
-/*
- * Second chance: replace the registered model immediately before AppTools
- * rebuilds the visible grid. This covers bars populated before rowStorageKey
- * was attached or returned from AppTools' cache.
- */
+/* Cached-row fallback: search by the exact notification title, never by index. */
 - (void)rebuildArrangedSubviews {
     if (![objc_getAssociatedObject(self, &kATRatioApplyingAssociation) boolValue]) {
-        ATPopupViewController *popup = ATRatioPopupForBar((ATActionsBarView *)self);
-        if (!popup) popup = gATRatioVisiblePopup ?: gATRatioBuildingPopup;
-        ATRatioReplaceRegisteredTile((ATActionsBarView *)self, popup, NO);
+        ATRatioReplaceRegisteredNotificationTile((ATActionsBarView *)self);
     }
     %orig;
 }
 
-/* Final fallback after the row has finished registering all of its items. */
 - (void)finishAddingItems {
     %orig;
-    NSString *rowKey = self.rowStorageKey;
-    if (rowKey.length == 0) rowKey = objc_getAssociatedObject(self, &kATRatioRowKeyAssociation);
-    if ([rowKey isEqualToString:kATRatioRowKey]) {
-        ATPopupViewController *popup = ATRatioPopupForBar((ATActionsBarView *)self);
-        if (!popup) popup = gATRatioVisiblePopup ?: gATRatioBuildingPopup;
-        BOOL changed = ATRatioReplaceRegisteredTile((ATActionsBarView *)self, popup, YES);
-        NSLog(@"[AppToolsRatio] app_row2 finished; post-build replacement=%@, items=%lu",
-              changed ? @"YES" : @"NO", (unsigned long)self.itemTitles.count);
+    if (![objc_getAssociatedObject(self, &kATRatioApplyingAssociation) boolValue] &&
+        ATRatioReplaceRegisteredNotificationTile((ATActionsBarView *)self)) {
+        objc_setAssociatedObject(self, &kATRatioApplyingAssociation, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [self rebuildArrangedSubviews];
+        objc_setAssociatedObject(self, &kATRatioApplyingAssociation, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
 }
 
@@ -583,50 +427,43 @@ static BOOL ATRatioReplaceRegisteredTile(ATActionsBarView *bar,
 
 #pragma mark - Hook installation
 
-static BOOL gATRatioCreateTimeHooksInstalled = NO;
-static NSUInteger gATRatioCreateTimeAttempts = 0;
+static BOOL gATRatioUIHooksInstalled = NO;
+static NSUInteger gATRatioUIInstallAttempts = 0;
 
-static void ATRatioTryInstallCreateTimeHooks(void) {
-    if (gATRatioCreateTimeHooksInstalled) return;
+static void ATRatioTryInstallUIHooks(void) {
+    if (gATRatioUIHooksInstalled) return;
 
     Class popupClass = objc_getClass("ATPopupViewController");
     Class barClass = objc_getClass("ATActionsBarView");
     BOOL popupReady = popupClass &&
-        class_getInstanceMethod(popupClass, @selector(liveActionsBarWithRowStorageKey:)) &&
-        class_getInstanceMethod(popupClass, @selector(viewDidLayoutSubviews));
+        class_getInstanceMethod(popupClass, @selector(liveActionsBarWithRowStorageKey:));
     BOOL barReady = barClass &&
         class_getInstanceMethod(barClass, @selector(addItemWithTitle:detail:image:handler:)) &&
-        class_getInstanceMethod(barClass, @selector(buttonTouchUpInside:)) &&
         class_getInstanceMethod(barClass, @selector(rebuildArrangedSubviews)) &&
         class_getInstanceMethod(barClass, @selector(finishAddingItems));
 
     if (popupReady && barReady) {
-        %init(ATRatioCreateTimeUI);
-        gATRatioCreateTimeHooksInstalled = YES;
-        NSLog(@"[AppToolsRatio] Installed AppTools panel hooks: %@ / %@",
-              NSStringFromClass(popupClass), NSStringFromClass(barClass));
+        %init(ATRatioExactNotificationTile);
+        gATRatioUIHooksInstalled = YES;
+        NSLog(@"[AppToolsRatio] Exact notification-tile hooks installed");
         return;
     }
 
-    if (gATRatioCreateTimeAttempts++ < 240) {
+    if (gATRatioUIInstallAttempts++ < 240) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            ATRatioTryInstallCreateTimeHooks();
-        });
+                       dispatch_get_main_queue(), ^{ ATRatioTryInstallUIHooks(); });
     } else {
-        NSLog(@"[AppToolsRatio] Hook targets not ready. ATPopup=%p ATActionsBar=%p",
+        NSLog(@"[AppToolsRatio] Cannot install tile hooks (ATPopup=%p ATActionsBar=%p)",
               popupClass, barClass);
     }
 }
 
 __attribute__((constructor))
-static void ATRatioCreateTimeInit(void) {
+static void ATRatioExactTileInit(void) {
     @autoreleasepool {
-        /* The bundle filter already limits this dylib to AppTools host processes. */
-        NSLog(@"[AppToolsRatio] UI replacement dylib constructor ran; bundle=%@",
-              NSBundle.mainBundle.bundleIdentifier ?: @"<nil>");
-        dispatch_async(dispatch_get_main_queue(), ^{
-            ATRatioTryInstallCreateTimeHooks();
-        });
+        NSString *bundleID = NSBundle.mainBundle.bundleIdentifier;
+        if (![bundleID isEqualToString:@"com.apple.springboard"]) return;
+        NSLog(@"[AppToolsRatio] Exact-tile replacement loaded in SpringBoard");
+        dispatch_async(dispatch_get_main_queue(), ^{ ATRatioTryInstallUIHooks(); });
     }
 }

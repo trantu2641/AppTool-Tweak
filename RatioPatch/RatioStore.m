@@ -81,7 +81,18 @@
         kCFPreferencesCurrentUser,
         kCFPreferencesAnyHost
     );
-    CFPreferencesSynchronize(appID, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+    Boolean synchronized = CFPreferencesSynchronize(appID, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+    CFPropertyListRef verifyValue = CFPreferencesCopyValue(
+        (__bridge CFStringRef)ATRatioPreferenceKey,
+        appID,
+        kCFPreferencesCurrentUser,
+        kCFPreferencesAnyHost
+    );
+    id verified = verifyValue ? CFBridgingRelease(verifyValue) : nil;
+    NSLog(@"[AppToolsRatio] Saved ratio for %@: %0.3f:%0.3f sync=%@ verified=%@",
+          bundleID, ratio.width, ratio.height,
+          synchronized ? @"YES" : @"NO",
+          [verified isKindOfClass:[NSDictionary class]] ? @"YES" : @"NO");
 
     NSMutableDictionary *registry = [self loadRegistry];
     registry[bundleID] = entry;
@@ -116,7 +127,7 @@
     }
 
     CFStringRef appID = [self appIDForBundleID:bundleID];
-    CFPreferencesSynchronize(appID, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+    Boolean synchronized = CFPreferencesSynchronize(appID, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
 
     CFPropertyListRef value = CFPreferencesCopyValue(
         (__bridge CFStringRef)ATRatioPreferenceKey,
@@ -126,15 +137,36 @@
     );
 
     id object = value ? CFBridgingRelease(value) : nil;
-    if (![object isKindOfClass:[NSDictionary class]]) return NO;
+    if (![object isKindOfClass:[NSDictionary class]]) {
+        /*
+         * Cross-app app-domain preferences may be hidden by iOS sandboxing.
+         * The same value is also stored in AppTools' own shared registry,
+         * keyed by the target Bundle ID. Try that stable tweak-owned domain
+         * before treating the selection as absent.
+         */
+        NSDictionary *registry = [self loadRegistry];
+        id fallback = registry[bundleID];
+        if ([fallback isKindOfClass:[NSDictionary class]]) {
+            object = fallback;
+            NSLog(@"[AppToolsRatio] Loaded %@ from the shared AppTools registry fallback", bundleID);
+        } else {
+            NSLog(@"[AppToolsRatio] No ratio preference for %@ (sync=%@, registry fallback absent)",
+                  bundleID, synchronized ? @"YES" : @"NO");
+            return NO;
+        }
+    }
 
     NSDictionary *entry = (NSDictionary *)object;
     CGFloat width = [entry[@"width"] doubleValue];
     CGFloat height = [entry[@"height"] doubleValue];
     ATRatio result = ATRatioMake(width, height);
 
-    if (!ATRatioValid(result)) return NO;
+    if (!ATRatioValid(result)) {
+        NSLog(@"[AppToolsRatio] Invalid stored ratio for %@", bundleID);
+        return NO;
+    }
     *ratio = result;
+    NSLog(@"[AppToolsRatio] Read ratio for %@: %0.3f:%0.3f", bundleID, result.width, result.height);
     return YES;
 }
 
