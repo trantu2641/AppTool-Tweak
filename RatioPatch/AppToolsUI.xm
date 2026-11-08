@@ -4,36 +4,32 @@
 
 #import "RatioStore.h"
 
-/* Private AppTools 2.9.0 interfaces confirmed from AppTool.dylib metadata. */
+/* Private AppTools 2.9.0 interfaces verified from the supplied AppTool.dylib. */
 @interface ATActionsBarView : UIView
 @property(nonatomic, copy) NSString *rowStorageKey;
-@property(nonatomic, copy) NSArray *registeredTitles;
 @property(nonatomic, copy) NSArray *itemTitles;
-- (BOOL)currentlyDisplaysItemWithTitle:(NSString *)title;
+@property(nonatomic, copy) NSArray *registeredTitles;
 - (void)addItemWithTitle:(NSString *)title
                   detail:(NSString *)detail
                    image:(UIImage *)image
                  handler:(void (^)(void))handler;
-- (void)finishAddingItems;
 @end
 
 @interface ATPopupViewController : UIViewController
 @property(nonatomic, copy) NSString *bundleID;
-- (ATActionsBarView *)liveActionsBarWithRowStorageKey:(NSString *)rowStorageKey;
 @end
 
-static NSString * const kATRatioFeatureTitle = @"Tỉ lệ màn hình";
-static NSString * const kATRatioFeatureRow = @"ATBarLayout_app_row2";
-static char kATRatioFeatureInstalledKey;
+static NSString * const kATRatioRowKey = @"ATBarLayout_app_row2";
+static NSString * const kATRatioTitle = @"Tỉ lệ màn hình";
+static ATPopupViewController *gATCurrentPopup = nil; // cleared when the popup disappears
+static BOOL gATRatioHooksInstalled = NO;
+static NSUInteger gATRatioInstallAttempts = 0;
 
-#pragma mark - Icon
+#pragma mark - Ratio icon
 
-/* Draw the icon in the same cyan line-art style as AppTools' Theme_New icons.
- * No external asset path or Root.plist entry is required. */
-static UIImage *ATRatioCreateFeatureIcon(void) {
-    const CGSize size = CGSizeMake(64.0, 64.0);
+static UIImage *ATRatioCreateIcon(void) {
+    CGSize size = CGSizeMake(64.0, 64.0);
     UIGraphicsBeginImageContextWithOptions(size, NO, 0.0);
-
     CGContextRef context = UIGraphicsGetCurrentContext();
     if (!context) {
         UIGraphicsEndImageContext();
@@ -46,19 +42,17 @@ static UIImage *ATRatioCreateFeatureIcon(void) {
     CGContextSetLineCap(context, kCGLineCapRound);
     CGContextSetLineJoin(context, kCGLineJoinRound);
 
-    /* Display frame */
-    UIBezierPath *frame = [UIBezierPath bezierPathWithRoundedRect:
-        CGRectMake(10.0, 7.0, 44.0, 50.0) cornerRadius:9.0];
-    frame.lineWidth = 3.2;
-    [frame stroke];
+    UIBezierPath *screen = [UIBezierPath bezierPathWithRoundedRect:
+        CGRectMake(10.0, 6.0, 44.0, 52.0) cornerRadius:9.0];
+    screen.lineWidth = 3.2;
+    [screen stroke];
 
-    /* Horizontal and vertical guides suggest adjustable screen proportions. */
     UIBezierPath *guides = [UIBezierPath bezierPath];
-    guides.lineWidth = 3.0;
-    [guides moveToPoint:CGPointMake(18.0, 23.0)];
-    [guides addLineToPoint:CGPointMake(46.0, 23.0)];
-    [guides moveToPoint:CGPointMake(18.0, 41.0)];
-    [guides addLineToPoint:CGPointMake(46.0, 41.0)];
+    guides.lineWidth = 2.8;
+    [guides moveToPoint:CGPointMake(18.0, 22.0)];
+    [guides addLineToPoint:CGPointMake(46.0, 22.0)];
+    [guides moveToPoint:CGPointMake(18.0, 42.0)];
+    [guides addLineToPoint:CGPointMake(46.0, 42.0)];
     [guides moveToPoint:CGPointMake(32.0, 14.0)];
     [guides addLineToPoint:CGPointMake(32.0, 50.0)];
     [guides stroke];
@@ -68,7 +62,19 @@ static UIImage *ATRatioCreateFeatureIcon(void) {
     return [image imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal];
 }
 
-#pragma mark - Presentation helpers
+#pragma mark - Popup lookup and ratio menu
+
+static ATPopupViewController *ATRatioPopupForBar(ATActionsBarView *bar) {
+    UIResponder *responder = bar;
+    NSUInteger depth = 0;
+    while (responder && depth++ < 80) {
+        if ([responder isKindOfClass:[ATPopupViewController class]]) {
+            return (ATPopupViewController *)responder;
+        }
+        responder = responder.nextResponder;
+    }
+    return gATCurrentPopup;
+}
 
 static UIViewController *ATRatioTopController(UIViewController *controller) {
     UIViewController *current = controller;
@@ -82,34 +88,21 @@ static void ATRatioConfigurePopover(UIAlertController *alert,
                                     UIViewController *presenter) {
     UIPopoverPresentationController *popover = alert.popoverPresentationController;
     if (!popover || !presenter.isViewLoaded) return;
-
     popover.sourceView = presenter.view;
     popover.sourceRect = CGRectMake(CGRectGetMidX(presenter.view.bounds),
-                                    CGRectGetMidY(presenter.view.bounds),
-                                    1.0, 1.0);
+                                    CGRectGetMidY(presenter.view.bounds), 1.0, 1.0);
     popover.permittedArrowDirections = 0;
 }
 
-static void ATRatioShowInvalidInput(UIViewController *presenter) {
-    UIAlertController *alert = [UIAlertController
-        alertControllerWithTitle:@"Giá trị không hợp lệ"
-                         message:@"Chiều rộng và chiều cao phải là số lớn hơn 0."
-                  preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Đóng"
-                                             style:UIAlertActionStyleDefault
-                                           handler:nil]];
-    [presenter presentViewController:alert animated:YES completion:nil];
-}
-
-static void ATRatioShowCustomDialog(NSString *bundleID,
-                                    UIViewController *presenter) {
+static void ATRatioShowCustomInput(NSString *bundleID,
+                                   UIViewController *presenter) {
     UIAlertController *alert = [UIAlertController
         alertControllerWithTitle:@"Tùy chỉnh tỉ lệ màn hình"
                          message:@"Nhập chiều rộng và chiều cao"
                   preferredStyle:UIAlertControllerStyleAlert];
 
     [alert addTextFieldWithConfigurationHandler:^(UITextField *field) {
-        field.placeholder = @"Chiều rộng, ví dụ 16";
+        field.placeholder = @"Chiều rộng, ví dụ 16 hoặc 19,5";
         field.keyboardType = UIKeyboardTypeDecimalPad;
     }];
     [alert addTextFieldWithConfigurationHandler:^(UITextField *field) {
@@ -127,11 +120,18 @@ static void ATRatioShowCustomDialog(NSString *bundleID,
             stringByReplacingOccurrencesOfString:@"," withString:@"."];
         NSString *heightText = [alert.textFields[1].text
             stringByReplacingOccurrencesOfString:@"," withString:@"."];
-
         CGFloat width = widthText.doubleValue;
         CGFloat height = heightText.doubleValue;
+
         if (!isfinite(width) || !isfinite(height) || width <= 0.0 || height <= 0.0) {
-            ATRatioShowInvalidInput(presenter);
+            UIAlertController *error = [UIAlertController
+                alertControllerWithTitle:@"Giá trị không hợp lệ"
+                                 message:@"Chiều rộng và chiều cao phải lớn hơn 0."
+                          preferredStyle:UIAlertControllerStyleAlert];
+            [error addAction:[UIAlertAction actionWithTitle:@"Đóng"
+                                                     style:UIAlertActionStyleDefault
+                                                   handler:nil]];
+            [presenter presentViewController:error animated:YES completion:nil];
             return;
         }
 
@@ -183,7 +183,7 @@ static void ATRatioShowMenu(NSString *bundleID,
     [alert addAction:[UIAlertAction actionWithTitle:@"Tùy chỉnh thủ công"
                                              style:UIAlertActionStyleDefault
                                            handler:^(UIAlertAction *action) {
-        ATRatioShowCustomDialog(bundleID, presenter);
+        ATRatioShowCustomInput(bundleID, presenter);
     }]];
     [alert addAction:[UIAlertAction actionWithTitle:@"Hủy"
                                              style:UIAlertActionStyleCancel
@@ -193,100 +193,113 @@ static void ATRatioShowMenu(NSString *bundleID,
     [presenter presentViewController:alert animated:YES completion:nil];
 }
 
-#pragma mark - Add the feature to the existing AppTools app-feature row
-
-static BOOL ATRatioBarAlreadyHasFeature(ATActionsBarView *bar) {
-    if (!bar) return NO;
-
-    if ([bar currentlyDisplaysItemWithTitle:kATRatioFeatureTitle]) return YES;
-    if ([bar.itemTitles containsObject:kATRatioFeatureTitle]) return YES;
-    if ([bar.registeredTitles containsObject:kATRatioFeatureTitle]) return YES;
-
-    return NO;
-}
-
-static BOOL ATRatioInstallFeature(ATPopupViewController *popup) {
-    if (!popup || !popup.isViewLoaded) return NO;
-
-    /*
-     * Use AppTools' own API to insert a normal feature tile.
-     * Do not add a free-floating UIButton to the first actions bar.
-     * app_row0 is the app-specific feature group containing Customize DPI,
-     * backup/restore documents and related per-app tools.
-     */
-    ATActionsBarView *bar =
-        [popup liveActionsBarWithRowStorageKey:kATRatioFeatureRow];
-
-    if (!bar) return NO;
-    if (ATRatioBarAlreadyHasFeature(bar)) return YES;
-
-    __weak ATPopupViewController *weakPopup = popup;
-    UIImage *icon = ATRatioCreateFeatureIcon();
-    if (!icon) return NO;
-
-    [bar addItemWithTitle:kATRatioFeatureTitle
-                   detail:nil
-                    image:icon
-                  handler:^{
-        __strong ATPopupViewController *strongPopup = weakPopup;
-        if (!strongPopup) return;
-
-        NSString *bundleID = strongPopup.bundleID;
-        if (![bundleID isKindOfClass:[NSString class]] || bundleID.length == 0) {
-            UIAlertController *error = [UIAlertController
-                alertControllerWithTitle:@"Không xác định được ứng dụng"
-                                 message:@"AppTools không cung cấp Bundle ID của ứng dụng đang chọn."
-                          preferredStyle:UIAlertControllerStyleAlert];
-            [error addAction:[UIAlertAction actionWithTitle:@"Đóng"
-                                                     style:UIAlertActionStyleDefault
-                                                   handler:nil]];
-            [strongPopup presentViewController:error animated:YES completion:nil];
-            return;
-        }
-
-        ATRatioShowMenu(bundleID, ATRatioTopController(strongPopup));
-    }];
-
-    /* AppTools uses this finalizer after registering its built-in feature items. */
-    [bar finishAddingItems];
-    return YES;
-}
-
-#pragma mark - SpringBoard-only hook
+#pragma mark - Replace the existing first tile in app_row2
 
 %group ATRatioAppToolsUI
+
 %hook ATPopupViewController
 
-- (void)viewDidLayoutSubviews {
+- (void)viewDidLoad {
     %orig;
+    gATCurrentPopup = (ATPopupViewController *)self;
+}
 
-    if (objc_getAssociatedObject(self, &kATRatioFeatureInstalledKey)) return;
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    gATCurrentPopup = (ATPopupViewController *)self;
+}
 
-    __weak ATPopupViewController *weakPopup = (ATPopupViewController *)self;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        __strong ATPopupViewController *popup = weakPopup;
-        if (!popup) return;
+- (void)viewDidDisappear:(BOOL)animated {
+    %orig;
+    if (gATCurrentPopup == (ATPopupViewController *)self) {
+        gATCurrentPopup = nil;
+    }
+}
 
-        if (ATRatioInstallFeature(popup)) {
-            objc_setAssociatedObject(popup,
-                                     &kATRatioFeatureInstalledKey,
-                                     @YES,
-                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        }
-    });
+%end
+
+%hook ATActionsBarView
+
+- (void)addItemWithTitle:(NSString *)title
+                  detail:(NSString *)detail
+                   image:(UIImage *)image
+                 handler:(void (^)(void))handler {
+
+    NSString *rowKey = self.rowStorageKey;
+    NSArray *existingTitles = self.itemTitles;
+    NSUInteger itemIndex = existingTitles.count;
+
+    /*
+     * In the supplied AppTools 2.9.0 panel, app_row2 starts with
+     * "Thông báo tin nhắn". Replace that existing tile rather than adding
+     * a new button at the edge or overlapping another tile.
+     */
+    if ([rowKey isEqualToString:kATRatioRowKey] && itemIndex == 0) {
+        ATPopupViewController *popup = ATRatioPopupForBar(self);
+        if (!popup) popup = gATCurrentPopup;
+
+        NSString *bundleID = [popup.bundleID copy];
+        __weak ATPopupViewController *weakPopup = popup;
+        __weak ATActionsBarView *weakBar = self;
+        UIImage *ratioIcon = ATRatioCreateIcon();
+
+        void (^ratioHandler)(void) = ^{
+            ATPopupViewController *activePopup = weakPopup;
+            if (!activePopup) {
+                activePopup = ATRatioPopupForBar(weakBar);
+            }
+            if (!activePopup) activePopup = gATCurrentPopup;
+
+            NSString *targetBundleID = bundleID.length ? bundleID : activePopup.bundleID;
+            if (targetBundleID.length == 0 || !activePopup) {
+                NSLog(@"[AppToolsRatio] Could not resolve the selected app Bundle ID.");
+                return;
+            }
+
+            ATRatioShowMenu(targetBundleID, ATRatioTopController(activePopup));
+        };
+
+        NSLog(@"[AppToolsRatio] Replacing app_row2 item '%@' with Screen Ratio.", title);
+        %orig(kATRatioTitle, nil, ratioIcon ?: image, ratioHandler);
+        return;
+    }
+
+    %orig(title, detail, image, handler);
 }
 
 %end
 %end
+
+#pragma mark - Delayed Logos installation (AppTool.dylib may load first/after us)
+
+static void ATRatioAttemptInstallHooks(void) {
+    if (gATRatioHooksInstalled) return;
+
+    if (objc_getClass("ATPopupViewController") && objc_getClass("ATActionsBarView")) {
+        %init(ATRatioAppToolsUI);
+        gATRatioHooksInstalled = YES;
+        NSLog(@"[AppToolsRatio] App-specific ratio tile hook installed.");
+        return;
+    }
+
+    if (gATRatioInstallAttempts++ < 40) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            ATRatioAttemptInstallHooks();
+        });
+    } else {
+        NSLog(@"[AppToolsRatio] AppTools classes were not found in SpringBoard; tile hook not installed.");
+    }
+}
 
 __attribute__((constructor))
 static void ATRatioAppToolsUIInit(void) {
     @autoreleasepool {
         NSString *bundleID = NSBundle.mainBundle.bundleIdentifier;
-        if ([bundleID isEqualToString:@"com.apple.springboard"] &&
-            objc_getClass("ATPopupViewController") &&
-            objc_getClass("ATActionsBarView")) {
-            %init(ATRatioAppToolsUI);
-        }
+        if (![bundleID isEqualToString:@"com.apple.springboard"]) return;
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            ATRatioAttemptInstallHooks();
+        });
     }
 }
