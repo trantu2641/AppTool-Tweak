@@ -3,12 +3,18 @@
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
+#import <CoreFoundation/CoreFoundation.h>
+#import <math.h>
 
-static NSString * const ATRatioStorePath =
-    @"/var/mobile/Library/Preferences/com.jtisvn.apptools.screenratio.plist";
-
-static NSString * const ATRatioNotification =
-    @"com.jtisvn.apptools.screenratio.changed";
+/*
+ * Shared preference entry stored in each target application's own
+ * CFPreferences domain. The target app can therefore read its own value
+ * through cfprefsd without depending on a cross-sandbox file path.
+ */
+static NSString * const ATRatioPreferenceKey = @"AppToolsScreenRatio";
+static NSString * const ATRatioNotification = @"com.flex2areo.apptools.screenratio.changed";
+static NSString * const ATRatioRegistryDomain = @"com.flex2areo.apptools";
+static NSString * const ATRatioRegistryKey = @"AppToolsScreenRatioRegistry";
 
 typedef struct {
     CGFloat width;
@@ -16,21 +22,19 @@ typedef struct {
 } ATRatio;
 
 static inline ATRatio ATRatioMake(CGFloat width, CGFloat height) {
-    ATRatio r;
-    r.width = width;
-    r.height = height;
-    return r;
+    ATRatio ratio;
+    ratio.width = width;
+    ratio.height = height;
+    return ratio;
 }
 
-static inline BOOL ATRatioValid(ATRatio r) {
-    return r.width > 0.0 && r.height > 0.0;
+static inline BOOL ATRatioValid(ATRatio ratio) {
+    return isfinite(ratio.width) && isfinite(ratio.height) &&
+           ratio.width > 0.0 && ratio.height > 0.0;
 }
 
-static inline CGFloat ATRatioValue(ATRatio r) {
-    if (r.height == 0.0)
-        return 0.0;
-
-    return r.width / r.height;
+static inline CGFloat ATRatioValue(ATRatio ratio) {
+    return ATRatioValid(ratio) ? ratio.width / ratio.height : 0.0;
 }
 
 #endif

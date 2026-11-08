@@ -1,128 +1,145 @@
 #import "RatioStore.h"
+#import <CoreFoundation/CoreFoundation.h>
 
 @implementation ATRatioStore
 
 + (instancetype)sharedStore {
     static ATRatioStore *store = nil;
-
     static dispatch_once_t onceToken;
-
     dispatch_once(&onceToken, ^{
         store = [[ATRatioStore alloc] init];
     });
-
     return store;
 }
 
-#pragma mark - Internal
+#pragma mark - CFPreferences helpers
 
-- (NSMutableDictionary *)load {
-    NSDictionary *dictionary =
-        [NSDictionary dictionaryWithContentsOfFile:ATRatioStorePath];
-
-    if (!dictionary)
-        return [NSMutableDictionary dictionary];
-
-    return [dictionary mutableCopy];
+- (CFStringRef)appIDForBundleID:(NSString *)bundleID {
+    return (__bridge CFStringRef)bundleID;
 }
 
-- (void)save:(NSDictionary *)dictionary {
+- (NSMutableDictionary *)loadRegistry {
+    CFPropertyListRef value = CFPreferencesCopyValue(
+        (__bridge CFStringRef)ATRatioRegistryKey,
+        (__bridge CFStringRef)ATRatioRegistryDomain,
+        kCFPreferencesCurrentUser,
+        kCFPreferencesAnyHost
+    );
 
-    NSString *directory =
-        [ATRatioStorePath stringByDeletingLastPathComponent];
-
-    [[NSFileManager defaultManager]
-        createDirectoryAtPath:directory
-        withIntermediateDirectories:YES
-        attributes:nil
-        error:nil];
-
-    [dictionary writeToFile:ATRatioStorePath
-                 atomically:YES];
+    id object = value ? CFBridgingRelease(value) : nil;
+    if ([object isKindOfClass:[NSDictionary class]]) {
+        return [object mutableCopy];
+    }
+    return [NSMutableDictionary dictionary];
 }
 
-#pragma mark - Public
+- (void)saveRegistry:(NSDictionary *)registry {
+    CFPreferencesSetValue(
+        (__bridge CFStringRef)ATRatioRegistryKey,
+        (__bridge CFPropertyListRef)registry,
+        (__bridge CFStringRef)ATRatioRegistryDomain,
+        kCFPreferencesCurrentUser,
+        kCFPreferencesAnyHost
+    );
+    CFPreferencesSynchronize(
+        (__bridge CFStringRef)ATRatioRegistryDomain,
+        kCFPreferencesCurrentUser,
+        kCFPreferencesAnyHost
+    );
+}
 
-- (void)setRatio:(ATRatio)ratio
-      forBundleID:(NSString *)bundleID {
+- (void)postRatioChangedNotification {
+    CFNotificationCenterPostNotification(
+        CFNotificationCenterGetDarwinNotifyCenter(),
+        (__bridge CFStringRef)ATRatioNotification,
+        NULL,
+        NULL,
+        YES
+    );
+}
 
-    if (!bundleID.length)
-        return;
+#pragma mark - Public API
 
-    if (!ATRatioValid(ratio))
-        return;
+- (void)setRatio:(ATRatio)ratio forBundleID:(NSString *)bundleID {
+    if (![bundleID isKindOfClass:[NSString class]] || bundleID.length == 0) return;
+    if (!ATRatioValid(ratio)) return;
 
-    NSMutableDictionary *all = [self load];
-
-    all[bundleID] = @{
+    NSDictionary *entry = @{
         @"width": @(ratio.width),
         @"height": @(ratio.height)
     };
 
-    [self save:all];
-
-    CFNotificationCenterPostNotification(
-        CFNotificationCenterGetDarwinNotifyCenter(),
-        (__bridge CFStringRef)ATRatioNotification,
-        NULL,
-        NULL,
-        YES
+    /*
+     * Write to the selected target application's own preference domain.
+     * The target runtime reads this same domain from inside that app.
+     */
+    CFStringRef appID = [self appIDForBundleID:bundleID];
+    CFPreferencesSetValue(
+        (__bridge CFStringRef)ATRatioPreferenceKey,
+        (__bridge CFPropertyListRef)entry,
+        appID,
+        kCFPreferencesCurrentUser,
+        kCFPreferencesAnyHost
     );
+    CFPreferencesSynchronize(appID, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+
+    NSMutableDictionary *registry = [self loadRegistry];
+    registry[bundleID] = entry;
+    [self saveRegistry:registry];
+
+    [self postRatioChangedNotification];
 }
 
 - (void)removeRatioForBundleID:(NSString *)bundleID {
+    if (![bundleID isKindOfClass:[NSString class]] || bundleID.length == 0) return;
 
-    if (!bundleID.length)
-        return;
-
-    NSMutableDictionary *all = [self load];
-
-    [all removeObjectForKey:bundleID];
-
-    [self save:all];
-
-    CFNotificationCenterPostNotification(
-        CFNotificationCenterGetDarwinNotifyCenter(),
-        (__bridge CFStringRef)ATRatioNotification,
+    CFStringRef appID = [self appIDForBundleID:bundleID];
+    CFPreferencesSetValue(
+        (__bridge CFStringRef)ATRatioPreferenceKey,
         NULL,
-        NULL,
-        YES
+        appID,
+        kCFPreferencesCurrentUser,
+        kCFPreferencesAnyHost
     );
+    CFPreferencesSynchronize(appID, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+
+    NSMutableDictionary *registry = [self loadRegistry];
+    [registry removeObjectForKey:bundleID];
+    [self saveRegistry:registry];
+
+    [self postRatioChangedNotification];
 }
 
-- (BOOL)ratioForBundleID:(NSString *)bundleID
-                    ratio:(ATRatio *)ratio {
-
-    if (!bundleID.length || !ratio)
+- (BOOL)ratioForBundleID:(NSString *)bundleID ratio:(ATRatio *)ratio {
+    if (![bundleID isKindOfClass:[NSString class]] || bundleID.length == 0 || ratio == NULL) {
         return NO;
+    }
 
-    NSDictionary *all = [self load];
+    CFStringRef appID = [self appIDForBundleID:bundleID];
+    CFPreferencesSynchronize(appID, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
 
-    NSDictionary *entry =
-        all[bundleID];
+    CFPropertyListRef value = CFPreferencesCopyValue(
+        (__bridge CFStringRef)ATRatioPreferenceKey,
+        appID,
+        kCFPreferencesCurrentUser,
+        kCFPreferencesAnyHost
+    );
 
-    if (!entry)
-        return NO;
+    id object = value ? CFBridgingRelease(value) : nil;
+    if (![object isKindOfClass:[NSDictionary class]]) return NO;
 
-    CGFloat width =
-        [entry[@"width"] doubleValue];
+    NSDictionary *entry = (NSDictionary *)object;
+    CGFloat width = [entry[@"width"] doubleValue];
+    CGFloat height = [entry[@"height"] doubleValue];
+    ATRatio result = ATRatioMake(width, height);
 
-    CGFloat height =
-        [entry[@"height"] doubleValue];
-
-    ATRatio result =
-        ATRatioMake(width, height);
-
-    if (!ATRatioValid(result))
-        return NO;
-
+    if (!ATRatioValid(result)) return NO;
     *ratio = result;
-
     return YES;
 }
 
 - (NSDictionary *)allRatios {
-    return [self load];
+    return [[self loadRegistry] copy];
 }
 
 @end
