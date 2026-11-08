@@ -7,11 +7,16 @@
 <dict>
 
     <key>Filter</key>
+
     <dict>
 
         <key>Bundles</key>
+
         <array>
-            <string>com.jtisvn.apptools</string>
+
+            <string>com.apple.springboard</string>
+            <string>com.apple.UIKit</string>
+
         </array>
 
     </dict>
