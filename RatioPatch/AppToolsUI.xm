@@ -95,14 +95,6 @@ static UIImage *ATRatioCreateIcon(void) {
 
 #pragma mark - Menu
 
-static UIViewController *ATRatioTopController(UIViewController *controller) {
-    UIViewController *current = controller;
-    while (current.presentedViewController) {
-        current = current.presentedViewController;
-    }
-    return current;
-}
-
 static void ATRatioConfigurePopover(UIAlertController *alert,
                                     UIViewController *presenter) {
     UIPopoverPresentationController *popover = alert.popoverPresentationController;
