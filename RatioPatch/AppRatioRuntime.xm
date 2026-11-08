@@ -4,74 +4,110 @@
 
 #import "RatioStore.h"
 
+/*
+ * Safe, per-app viewport runtime.
+ *
+ * The dylib may be loaded into UIKit apps because the original AppTools
+ * MobileSubstrate filter includes com.apple.UIKit.  Do NOT hook UIKit classes
+ * unless this process has a valid ratio saved for its own Bundle ID.
+ * This avoids touching unrelated apps at launch.
+ *
+ * Only UIViewController -viewDidLayoutSubviews is hooked, and only after a
+ * saved ratio is found.  There are deliberately no global hooks on UIView,
+ * UIWindow, UIScreen, setFrame:, or layoutSubviews.
+ */
+
 static NSString *gATRatioTargetBundleID = nil;
 static ATRatio gATRatioTarget = {0.0, 0.0};
 static BOOL gATRatioActive = NO;
+static BOOL gATRatioHooksInstalled = NO;
 static BOOL gATRatioApplyingGeometry = NO;
 static id gATRatioActiveObserver = nil;
 
-static char kATRatioOriginalMaskKey;
-static char kATRatioOriginalTranslatesKey;
+static char kATRatioOriginalFrameKey;
 static char kATRatioOriginalRootClipsKey;
 static char kATRatioOriginalWindowColorKey;
 static char kATRatioOriginalWindowClipsKey;
 
 #pragma mark - Geometry
 
-static BOOL ATRatioRectsEqual(CGRect a, CGRect b) {
+static BOOL ATRatioRectsApproximatelyEqual(CGRect a, CGRect b) {
     return fabs(a.origin.x - b.origin.x) < 0.75 &&
            fabs(a.origin.y - b.origin.y) < 0.75 &&
            fabs(a.size.width - b.size.width) < 0.75 &&
            fabs(a.size.height - b.size.height) < 0.75;
 }
 
-/* The selected ratios are long-side:short-side. Portrait uses the inverse. */
-static CGRect ATRatioViewportFrame(UIWindow *window, ATRatio ratio) {
+/* Presets are expressed as long-side:short-side, independent of orientation. */
+static CGRect ATRatioViewportInWindow(UIWindow *window, ATRatio ratio) {
     CGRect bounds = window.bounds;
-    CGFloat screenWidth = CGRectGetWidth(bounds);
-    CGFloat screenHeight = CGRectGetHeight(bounds);
+    CGFloat width = CGRectGetWidth(bounds);
+    CGFloat height = CGRectGetHeight(bounds);
 
-    if (screenWidth <= 0.0 || screenHeight <= 0.0 || !ATRatioValid(ratio)) {
-        return bounds;
-    }
+    if (width <= 0.0 || height <= 0.0 || !ATRatioValid(ratio)) return bounds;
 
     CGFloat shortOverLong = MIN(ratio.width, ratio.height) / MAX(ratio.width, ratio.height);
-    BOOL portrait = screenHeight >= screenWidth;
-    CGFloat targetWidth = screenWidth;
-    CGFloat targetHeight = screenHeight;
+    BOOL portrait = height >= width;
+    CGFloat targetWidth = width;
+    CGFloat targetHeight = height;
 
     if (portrait) {
         targetHeight = targetWidth / shortOverLong;
-        if (targetHeight > screenHeight) {
-            targetHeight = screenHeight;
+        if (targetHeight > height) {
+            targetHeight = height;
             targetWidth = targetHeight * shortOverLong;
         }
     } else {
         targetWidth = targetHeight / shortOverLong;
-        if (targetWidth > screenWidth) {
-            targetWidth = screenWidth;
+        if (targetWidth > width) {
+            targetWidth = width;
             targetHeight = targetWidth * shortOverLong;
         }
     }
 
-    return CGRectMake(CGRectGetMinX(bounds) + (screenWidth - targetWidth) * 0.5,
-                      CGRectGetMinY(bounds) + (screenHeight - targetHeight) * 0.5,
+    return CGRectMake(CGRectGetMinX(bounds) + (width - targetWidth) * 0.5,
+                      CGRectGetMinY(bounds) + (height - targetHeight) * 0.5,
                       targetWidth, targetHeight);
 }
 
-static CGRect ATRatioFrameInSuperview(UIWindow *window, UIView *rootView, BOOL enabled) {
-    CGRect frameInWindow = (enabled && ATRatioValid(gATRatioTarget))
-        ? ATRatioViewportFrame(window, gATRatioTarget)
-        : window.bounds;
-
+static CGRect ATRatioFrameInSuperview(UIWindow *window, UIView *rootView, ATRatio ratio) {
+    CGRect frameInWindow = ATRatioViewportInWindow(window, ratio);
     if (rootView.superview && rootView.superview != window) {
         return [rootView.superview convertRect:frameInWindow fromView:window];
     }
     return frameInWindow;
 }
 
-static void ATRatioSetFrame(UIView *view, CGRect frame) {
-    if (!view || ATRatioRectsEqual(view.frame, frame)) return;
+#pragma mark - Preserve and restore original geometry
+
+static void ATRatioRememberGeometry(UIView *rootView, UIWindow *window) {
+    if (!objc_getAssociatedObject(rootView, &kATRatioOriginalFrameKey)) {
+        objc_setAssociatedObject(rootView,
+                                 &kATRatioOriginalFrameKey,
+                                 [NSValue valueWithCGRect:rootView.frame],
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(rootView,
+                                 &kATRatioOriginalRootClipsKey,
+                                 @(rootView.clipsToBounds),
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+
+    if (!objc_getAssociatedObject(window, &kATRatioOriginalWindowColorKey)) {
+        id originalColor = window.backgroundColor ?: (id)[NSNull null];
+        objc_setAssociatedObject(window,
+                                 &kATRatioOriginalWindowColorKey,
+                                 originalColor,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(window,
+                                 &kATRatioOriginalWindowClipsKey,
+                                 @(window.clipsToBounds),
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+}
+
+static void ATRatioSetFrameWithoutAnimation(UIView *view, CGRect frame) {
+    if (!view || ATRatioRectsApproximatelyEqual(view.frame, frame)) return;
+
     BOOL previous = gATRatioApplyingGeometry;
     gATRatioApplyingGeometry = YES;
     [UIView performWithoutAnimation:^{
@@ -81,91 +117,61 @@ static void ATRatioSetFrame(UIView *view, CGRect frame) {
     gATRatioApplyingGeometry = previous;
 }
 
-#pragma mark - Preserve and restore UIKit geometry
+static void ATRatioRestoreController(UIViewController *controller) {
+    if (!controller || !controller.isViewLoaded) return;
 
-static void ATRatioRememberOriginalState(UIView *rootView, UIWindow *window) {
-    if (!objc_getAssociatedObject(rootView, &kATRatioOriginalMaskKey)) {
-        objc_setAssociatedObject(rootView, &kATRatioOriginalMaskKey,
-                                 @(rootView.autoresizingMask), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        objc_setAssociatedObject(rootView, &kATRatioOriginalTranslatesKey,
-                                 @(rootView.translatesAutoresizingMaskIntoConstraints), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        objc_setAssociatedObject(rootView, &kATRatioOriginalRootClipsKey,
-                                 @(rootView.clipsToBounds), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    UIView *rootView = controller.view;
+    UIWindow *window = rootView.window;
+    if (!window || window.rootViewController != controller) return;
+
+    NSValue *originalFrame = objc_getAssociatedObject(rootView, &kATRatioOriginalFrameKey);
+    NSNumber *originalRootClips = objc_getAssociatedObject(rootView, &kATRatioOriginalRootClipsKey);
+    if (originalFrame) {
+        ATRatioSetFrameWithoutAnimation(rootView, originalFrame.CGRectValue);
+        if (originalRootClips) rootView.clipsToBounds = originalRootClips.boolValue;
+        objc_setAssociatedObject(rootView, &kATRatioOriginalFrameKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(rootView, &kATRatioOriginalRootClipsKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
 
-    if (!objc_getAssociatedObject(window, &kATRatioOriginalWindowColorKey)) {
-        id color = window.backgroundColor ?: (id)[NSNull null];
-        objc_setAssociatedObject(window, &kATRatioOriginalWindowColorKey,
-                                 color, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        objc_setAssociatedObject(window, &kATRatioOriginalWindowClipsKey,
-                                 @(window.clipsToBounds), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    id originalColor = objc_getAssociatedObject(window, &kATRatioOriginalWindowColorKey);
+    NSNumber *originalWindowClips = objc_getAssociatedObject(window, &kATRatioOriginalWindowClipsKey);
+    if (originalColor) {
+        window.backgroundColor = (originalColor == (id)[NSNull null]) ? nil : originalColor;
+        if (originalWindowClips) window.clipsToBounds = originalWindowClips.boolValue;
+        objc_setAssociatedObject(window, &kATRatioOriginalWindowColorKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(window, &kATRatioOriginalWindowClipsKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
 }
 
-static void ATRatioRestoreWindow(UIWindow *window, UIView *rootView) {
-    if (!window || !rootView) return;
+#pragma mark - Apply only to the selected app's root controller
 
-    ATRatioSetFrame(rootView, ATRatioFrameInSuperview(window, rootView, NO));
-
-    NSNumber *mask = objc_getAssociatedObject(rootView, &kATRatioOriginalMaskKey);
-    NSNumber *translates = objc_getAssociatedObject(rootView, &kATRatioOriginalTranslatesKey);
-    NSNumber *clips = objc_getAssociatedObject(rootView, &kATRatioOriginalRootClipsKey);
-    if (mask) rootView.autoresizingMask = (UIViewAutoresizing)mask.unsignedIntegerValue;
-    if (translates) rootView.translatesAutoresizingMaskIntoConstraints = translates.boolValue;
-    if (clips) rootView.clipsToBounds = clips.boolValue;
-
-    id color = objc_getAssociatedObject(window, &kATRatioOriginalWindowColorKey);
-    NSNumber *windowClips = objc_getAssociatedObject(window, &kATRatioOriginalWindowClipsKey);
-    if (color) window.backgroundColor = (color == (id)[NSNull null]) ? nil : color;
-    if (windowClips) window.clipsToBounds = windowClips.boolValue;
-
-    objc_setAssociatedObject(rootView, &kATRatioOriginalMaskKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    objc_setAssociatedObject(rootView, &kATRatioOriginalTranslatesKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    objc_setAssociatedObject(rootView, &kATRatioOriginalRootClipsKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    objc_setAssociatedObject(window, &kATRatioOriginalWindowColorKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    objc_setAssociatedObject(window, &kATRatioOriginalWindowClipsKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-}
-
-#pragma mark - Apply to the selected app's actual UIWindow root view
-
-static void ATRatioApplyToWindow(UIWindow *window) {
-    if (!window || !NSThread.isMainThread) return;
+static void ATRatioApplyToRootController(UIViewController *controller) {
+    if (!gATRatioActive || !ATRatioValid(gATRatioTarget) || !controller || !controller.isViewLoaded) return;
 
     NSString *processBundleID = NSBundle.mainBundle.bundleIdentifier;
-    if (processBundleID.length == 0 ||
-        ![processBundleID isEqualToString:gATRatioTargetBundleID]) return;
+    if (![processBundleID isEqualToString:gATRatioTargetBundleID]) return;
 
-    UIViewController *rootController = window.rootViewController;
-    UIView *rootView = rootController.viewIfLoaded;
-    if (!rootController || !rootView || !rootView.superview) return;
+    UIView *rootView = controller.view;
+    UIWindow *window = rootView.window;
+    if (!window || window.rootViewController != controller || !rootView.superview) return;
 
-    if (!gATRatioActive || !ATRatioValid(gATRatioTarget)) {
-        if (objc_getAssociatedObject(rootView, &kATRatioOriginalMaskKey) ||
-            objc_getAssociatedObject(window, &kATRatioOriginalWindowColorKey)) {
-            ATRatioRestoreWindow(window, rootView);
-            NSLog(@"[AppToolsRatio] Restored full-screen geometry for %@", processBundleID);
-        }
-        return;
-    }
+    ATRatioRememberGeometry(rootView, window);
 
-    ATRatioRememberOriginalState(rootView, window);
+    /* Letterbox only this app's root content. Do not alter the device screen. */
     window.backgroundColor = UIColor.blackColor;
     window.clipsToBounds = YES;
     rootView.clipsToBounds = YES;
-    rootView.autoresizingMask = UIViewAutoresizingNone;
-    rootView.translatesAutoresizingMaskIntoConstraints = YES;
 
-    CGRect targetFrame = ATRatioFrameInSuperview(window, rootView, YES);
-    if (!ATRatioRectsEqual(rootView.frame, targetFrame)) {
-        ATRatioSetFrame(rootView, targetFrame);
-        [rootView layoutIfNeeded];
-        NSLog(@"[AppToolsRatio] Applied %@ to %@. Window=%@ rootFrame=%@",
-              NSStringFromCGSize(CGSizeMake(gATRatioTarget.width, gATRatioTarget.height)),
-              processBundleID, NSStringFromCGRect(window.bounds), NSStringFromCGRect(rootView.frame));
+    CGRect targetFrame = ATRatioFrameInSuperview(window, rootView, gATRatioTarget);
+    if (!ATRatioRectsApproximatelyEqual(rootView.frame, targetFrame)) {
+        ATRatioSetFrameWithoutAnimation(rootView, targetFrame);
+        NSLog(@"[AppToolsRatio] Applied %.3f:%.3f to %@ (root=%@)",
+              gATRatioTarget.width, gATRatioTarget.height,
+              processBundleID, NSStringFromCGRect(rootView.frame));
     }
 }
 
-static NSArray<UIWindow *> *ATRatioApplicationWindows(void) {
+static NSArray<UIWindow *> *ATRatioVisibleWindows(void) {
     UIApplication *application = UIApplication.sharedApplication;
     if (!application) return @[];
 
@@ -193,31 +199,82 @@ static void ATRatioApplyToVisibleWindows(void) {
         return;
     }
 
-    for (UIWindow *window in ATRatioApplicationWindows()) {
-        ATRatioApplyToWindow(window);
+    NSString *processBundleID = NSBundle.mainBundle.bundleIdentifier;
+    if (![processBundleID isEqualToString:gATRatioTargetBundleID]) return;
+
+    for (UIWindow *window in ATRatioVisibleWindows()) {
+        UIViewController *rootController = window.rootViewController;
+        if (rootController) ATRatioApplyToRootController(rootController);
     }
 }
 
-#pragma mark - Preference reload and diagnostics
+static void ATRatioRestoreVisibleWindows(void) {
+    if (!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(), ^{ ATRatioRestoreVisibleWindows(); });
+        return;
+    }
+
+    NSString *processBundleID = NSBundle.mainBundle.bundleIdentifier;
+    if (![processBundleID isEqualToString:gATRatioTargetBundleID]) return;
+
+    for (UIWindow *window in ATRatioVisibleWindows()) {
+        UIViewController *rootController = window.rootViewController;
+        if (rootController) ATRatioRestoreController(rootController);
+    }
+}
+
+#pragma mark - Conditional Logos hook
+
+%group ATRatioSelectedTargetApp
+%hook UIViewController
+
+- (void)viewDidLayoutSubviews {
+    %orig;
+    if (self.isViewLoaded && self.view.window && self.view.window.rootViewController == self) {
+        ATRatioApplyToRootController(self);
+    }
+}
+
+%end
+%end
+
+#pragma mark - Preference refresh
 
 static void ATRatioReloadForCurrentProcess(void) {
     NSString *bundleID = NSBundle.mainBundle.bundleIdentifier;
-    if (bundleID.length == 0) return;
-
-    if ([bundleID isEqualToString:@"com.apple.springboard"] ||
+    if (bundleID.length == 0 ||
+        [bundleID isEqualToString:@"com.apple.springboard"] ||
         [bundleID isEqualToString:@"com.flex2areo.apptools"]) return;
 
     ATRatio selected = {0.0, 0.0};
-    BOOL found = [[ATRatioStore sharedStore] ratioForBundleID:bundleID ratio:&selected];
-    gATRatioTargetBundleID = [bundleID copy];
-    gATRatioActive = found && ATRatioValid(selected);
-    gATRatioTarget = gATRatioActive ? selected : ATRatioMake(0.0, 0.0);
+    BOOL hasRatio = [[ATRatioStore sharedStore] ratioForBundleID:bundleID ratio:&selected] && ATRatioValid(selected);
+    NSLog(@"[AppToolsRatio] Runtime config: app=%@ hasRatio=%@ ratio=%0.3f:%0.3f",
+          bundleID, hasRatio ? @"YES" : @"NO", selected.width, selected.height);
 
-    NSLog(@"[AppToolsRatio] Runtime preference check: bundle=%@ found=%@ active=%@ ratio=%0.3f:%0.3f",
-          bundleID, found ? @"YES" : @"NO", gATRatioActive ? @"YES" : @"NO",
-          selected.width, selected.height);
+    if (hasRatio) {
+        gATRatioTargetBundleID = [bundleID copy];
+        gATRatioTarget = selected;
+        gATRatioActive = YES;
 
-    dispatch_async(dispatch_get_main_queue(), ^{ ATRatioApplyToVisibleWindows(); });
+        /* Crucial safety guard: install UIKit hooks only for configured apps. */
+        if (!gATRatioHooksInstalled) {
+            %init(ATRatioSelectedTargetApp);
+            gATRatioHooksInstalled = YES;
+            NSLog(@"[AppToolsRatio] Installed the single root-controller layout hook in %@", bundleID);
+        }
+
+        dispatch_async(dispatch_get_main_queue(), ^{ ATRatioApplyToVisibleWindows(); });
+    } else {
+        BOOL wasActive = gATRatioActive;
+        gATRatioActive = NO;
+        gATRatioTarget = ATRatioMake(0.0, 0.0);
+        gATRatioTargetBundleID = [bundleID copy];
+        if (wasActive) {
+            NSLog(@"[AppToolsRatio] Clearing ratio for %@ and restoring original root geometry", bundleID);
+            dispatch_async(dispatch_get_main_queue(), ^{ ATRatioRestoreVisibleWindows(); });
+        }
+        /* If no ratio was ever set, NO UIKit hook is installed in this app. */
+    }
 }
 
 static void ATRatioPreferenceChanged(CFNotificationCenterRef center,
@@ -225,10 +282,8 @@ static void ATRatioPreferenceChanged(CFNotificationCenterRef center,
                                      CFStringRef name,
                                      const void *object,
                                      CFDictionaryRef userInfo) {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        NSLog(@"[AppToolsRatio] Received screen-ratio Darwin notification");
-        ATRatioReloadForCurrentProcess();
-    });
+    (void)center; (void)observer; (void)name; (void)object; (void)userInfo;
+    dispatch_async(dispatch_get_main_queue(), ^{ ATRatioReloadForCurrentProcess(); });
 }
 
 static void ATRatioApplicationDidBecomeActive(NSNotification *notification) {
@@ -236,65 +291,7 @@ static void ATRatioApplicationDidBecomeActive(NSNotification *notification) {
     ATRatioReloadForCurrentProcess();
 }
 
-#pragma mark - UIKit enforcement hooks
-
-%group ATRatioTargetAppRuntime
-
-%hook UIView
-
-/*
- * UIKit and individual apps often reset the root controller view's frame
- * during layout. Intercept frame assignments for that one view only so the
- * selected viewport remains in effect. Other views are untouched.
- */
-- (void)setFrame:(CGRect)frame {
-    if (!gATRatioApplyingGeometry && gATRatioActive &&
-        [NSBundle.mainBundle.bundleIdentifier isEqualToString:gATRatioTargetBundleID]) {
-        UIWindow *window = self.window;
-        UIViewController *rootController = window.rootViewController;
-        if (window && rootController && rootController.viewIfLoaded == (UIView *)self && self.superview) {
-            CGRect forcedFrame = ATRatioFrameInSuperview(window, (UIView *)self, YES);
-            %orig(forcedFrame);
-            return;
-        }
-    }
-    %orig(frame);
-}
-
-%end
-
-%hook UIViewController
-
-- (void)viewDidLayoutSubviews {
-    %orig;
-    UIWindow *window = self.viewIfLoaded.window;
-    if (window && window.rootViewController == self) ATRatioApplyToWindow(window);
-}
-
-- (void)viewDidAppear:(BOOL)animated {
-    %orig;
-    UIWindow *window = self.viewIfLoaded.window;
-    if (window && window.rootViewController == self) ATRatioApplyToWindow(window);
-}
-
-%end
-
-%hook UIWindow
-
-- (void)setRootViewController:(UIViewController *)rootViewController {
-    %orig(rootViewController);
-    dispatch_async(dispatch_get_main_queue(), ^{ ATRatioApplyToWindow((UIWindow *)self); });
-}
-
-- (void)makeKeyAndVisible {
-    %orig;
-    dispatch_async(dispatch_get_main_queue(), ^{ ATRatioApplyToWindow((UIWindow *)self); });
-}
-
-%end
-%end
-
-#pragma mark - Runtime constructor
+#pragma mark - Constructor
 
 %ctor {
     @autoreleasepool {
@@ -303,8 +300,12 @@ static void ATRatioApplicationDidBecomeActive(NSNotification *notification) {
             [bundleID isEqualToString:@"com.apple.springboard"] ||
             [bundleID isEqualToString:@"com.flex2areo.apptools"]) return;
 
-        NSLog(@"[AppToolsRatio] Target-app runtime loaded in %@", bundleID);
-
+        /*
+         * The lightweight Darwin observer is registered in UIKit processes,
+         * but no UIView/UIViewController/UIWindow methods are hooked until a
+         * valid per-app ratio exists. This also supports changes while app is
+         * already running.
+         */
         CFNotificationCenterAddObserver(
             CFNotificationCenterGetDarwinNotifyCenter(),
             NULL,
@@ -322,7 +323,6 @@ static void ATRatioApplicationDidBecomeActive(NSNotification *notification) {
             ATRatioApplicationDidBecomeActive(notification);
         }];
 
-        %init(ATRatioTargetAppRuntime);
-        ATRatioReloadForCurrentProcess();
+        dispatch_async(dispatch_get_main_queue(), ^{ ATRatioReloadForCurrentProcess(); });
     }
 }
