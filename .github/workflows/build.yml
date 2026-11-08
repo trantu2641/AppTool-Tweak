@@ -1,1 +1,55 @@
+name: Build AppTools Ratio
 
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          brew update
+          brew install dpkg
+
+      - name: Install Theos
+        run: |
+          git clone --recursive \
+            https://github.com/theos/theos.git \
+            $HOME/theos
+
+      - name: Install iOS SDK
+        run: |
+          echo "Using Theos SDK configuration"
+
+      - name: Build tweak
+        env:
+          THEOS: ${{ runner.temp }}/theos
+        run: |
+          export THEOS="$HOME/theos"
+
+          cd RatioPatch
+
+          make clean || true
+          make package FINALPACKAGE=1
+
+      - name: Prepare original package
+        run: |
+          chmod +x scripts/build_deb.sh
+
+      - name: Inject patch
+        run: |
+          export THEOS="$HOME/theos"
+          chmod +x scripts/build_deb.sh
+          ./scripts/build_deb.sh
+
+      - name: Upload DEB
+        uses: actions/upload-artifact@v4
+        with:
+          name: AppTools-2.9.0-Ratio
+          path: dist/AppTools-2.9.0-Ratio.deb
