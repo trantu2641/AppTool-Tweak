@@ -1,4 +1,4 @@
-name: Build AppTools VI + Ratio
+name: Build AppTools VI + Ratio (RootHide)
 
 on:
   workflow_dispatch:
@@ -25,19 +25,19 @@ jobs:
           brew update
           brew install dpkg ldid
 
-      - name: Install Theos and iOS SDK
+      - name: Install RootHide Theos and iOS SDK
         shell: bash
         run: |
           set -euo pipefail
-          git clone --depth 1 --recursive https://github.com/theos/theos.git "$HOME/theos"
+          git clone --depth 1 --recursive https://github.com/roothide/theos.git "$HOME/theos"
           mkdir -p "$HOME/theos/sdks"
           git clone --depth 1 https://github.com/theos/sdks.git "$RUNNER_TEMP/theos-sdks"
           test -d "$RUNNER_TEMP/theos-sdks/iPhoneOS16.5.sdk"
           cp -R "$RUNNER_TEMP/theos-sdks/iPhoneOS16.5.sdk" "$HOME/theos/sdks/"
           echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
-          echo "THEOS_PACKAGE_SCHEME=rootless" >> "$GITHUB_ENV"
+          echo "THEOS_PACKAGE_SCHEME=roothide" >> "$GITHUB_ENV"
 
-      - name: Verify source files
+      - name: Verify inputs
         shell: bash
         run: |
           set -euo pipefail
@@ -46,17 +46,28 @@ jobs:
           test -f RatioPatch/Makefile
           test -f RatioPatch/AppToolsUI.xm
           test -f RatioPatch/AppRatioRuntime.xm
+          test -f RatioPatch/DPIKeyboardFix.xm
           test -f RatioPatch/RatioStore.m
           test -d "$THEOS/sdks/iPhoneOS16.5.sdk"
           dpkg-deb --info original/AppTools-2.9.0.deb
 
-      - name: Build patch package
+      - name: Build RootHide tweak
         shell: bash
         run: |
           set -euo pipefail
           cd RatioPatch
+          rm -rf packages .theos
           make clean
-          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide
+          PATCH_DYLIB="$(find packages -type f -name 'AppToolsRatioPatch.dylib' -print -quit)"
+          test -n "$PATCH_DYLIB"
+          otool -l "$PATCH_DYLIB" > "$RUNNER_TEMP/patch-load-commands.txt"
+          if grep -q '/var/jb/' "$RUNNER_TEMP/patch-load-commands.txt"; then
+            echo "ERROR: rootless /var/jb runpath found in RootHide dylib" >&2
+            grep -B2 -A2 '/var/jb/' "$RUNNER_TEMP/patch-load-commands.txt" >&2 || true
+            exit 1
+          fi
+          grep -q '@loader_path/.jbroot' "$RUNNER_TEMP/patch-load-commands.txt"
           test -n "$(find packages -maxdepth 1 -type f -name '*.deb' -print -quit)"
 
       - name: Repack original AppTools
@@ -69,6 +80,6 @@ jobs:
       - name: Upload modified DEB
         uses: actions/upload-artifact@v4
         with:
-          name: AppTools-2.9.0-VI-Ratio
+          name: AppTools-2.9.0-VI-Ratio-RootHide
           path: dist/*.deb
           if-no-files-found: error
