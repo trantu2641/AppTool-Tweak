@@ -33,8 +33,8 @@
 @property(nonatomic, copy) NSString *rowStorageKey;
 @property(nonatomic, copy) NSArray *itemTitles;
 @property(nonatomic, copy) NSArray *itemDetails;
-@property(nonatomic, copy) NSArray *itemImages;
-@property(nonatomic, copy) NSArray *itemHandlers;
+- (NSArray *)itemImages;
+- (NSArray *)itemHandlers;
 - (void)setTitle:(NSString *)title forItemAtIndex:(NSInteger)index;
 - (void)setDetail:(NSString *)detail forItemAtIndex:(NSInteger)index;
 - (void)setItemImages:(NSMutableArray *)images;
