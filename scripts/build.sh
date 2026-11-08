@@ -93,7 +93,7 @@ control = debian / "control"
 text = control.read_text(encoding="utf-8")
 if not re.search(r"(?m)^Version:\s*", text):
     raise SystemExit("Original package control has no Version field")
-version = "2.9.0-vi-ratio6"
+version = "2.9.0-vi-ratio8"
 text = re.sub(r"(?m)^Version:\s*.*$", f"Version: {version}", text, count=1)
 installed_bytes = sum(p.stat().st_size for p in root.rglob("*") if p.is_file() and "DEBIAN" not in p.parts)
 installed_kb = math.ceil(installed_bytes / 1024)
@@ -111,7 +111,7 @@ for path in sorted(root.rglob("*")):
 PYCODE
 
 echo "[5/6] Build modified AppTools DEB"
-FINAL="$OUT/com.jtisvn.apptools_2.9.0-vi-ratio6_iphoneos-arm64e.deb"
+FINAL="$OUT/com.jtisvn.apptools_2.9.0-vi-ratio8_iphoneos-arm64e.deb"
 dpkg-deb --build --root-owner-group "$WORK/rootfs" "$FINAL"
 
 echo "[6/6] Verify RootHide package layout"
