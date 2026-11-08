@@ -8,8 +8,9 @@
  * App-specific viewport runtime.
  *
  * The process reads its own Bundle ID's ratio from ATRatioStore. AppTools
- * publishes a Darwin notification when the value changes. The hook is
- * installed only in a target app after that app has a valid saved ratio.
+ * publishes a Darwin notification when the value changes. The UIViewController
+ * hook is installed once from %ctor for eligible UIKit app processes; the hook
+ * body does nothing unless the current process has a saved ratio.
  *
  * This implementation does not hook UIScreen.bounds,
  * UIScreen.applicationFrame, or UIWindow.layoutSubviews.
@@ -18,7 +19,6 @@
 static NSString *gATRatioTargetBundleID = nil;
 static ATRatio gATRatioTarget = {0.0, 0.0};
 static BOOL gATRatioActive = NO;
-static BOOL gATRatioHookInstalled = NO;
 static id gATRatioActiveObserver = nil;
 
 static char kATRatioOriginalFrameKey;
@@ -36,16 +36,14 @@ static BOOL ATRatioRectsEqual(CGRect a, CGRect b) {
            fabs(a.size.height - b.size.height) < 0.75;
 }
 
-/*
- * Presets are expressed as long-side:short-side (16:9, 4:3, ...).
- * The content viewport is centered and the uncovered area is black.
- */
+/* Presets are expressed as long-side:short-side (16:9, 4:3, ...). */
 static CGRect ATRatioViewportFrame(UIWindow *window, ATRatio ratio) {
     CGRect bounds = window.bounds;
     CGFloat screenWidth = CGRectGetWidth(bounds);
     CGFloat screenHeight = CGRectGetHeight(bounds);
 
-    if (screenWidth <= 0.0 || screenHeight <= 0.0 || !ATRatioValid(ratio)) {
+    if (screenWidth <= 0.0 || screenHeight <= 0.0 ||
+        !ATRatioValid(ratio)) {
         return bounds;
     }
 
@@ -114,7 +112,9 @@ static void ATRatioRestoreOriginalGeometry(UIView *rootView, UIWindow *window) {
 
     if (originalFrame) {
         rootView.frame = originalFrame.CGRectValue;
-        if (originalMask) rootView.autoresizingMask = (UIViewAutoresizing)originalMask.unsignedIntegerValue;
+        if (originalMask) {
+            rootView.autoresizingMask = (UIViewAutoresizing)originalMask.unsignedIntegerValue;
+        }
         if (originalClips) rootView.clipsToBounds = originalClips.boolValue;
         [rootView setNeedsLayout];
 
@@ -133,7 +133,7 @@ static void ATRatioRestoreOriginalGeometry(UIView *rootView, UIWindow *window) {
     }
 }
 
-#pragma mark - Apply to the selected app's root controller only
+#pragma mark - Apply to this app's root controller only
 
 static void ATRatioApplyToRootController(UIViewController *controller) {
     if (!controller || !controller.isViewLoaded) return;
@@ -193,8 +193,12 @@ static void ATRatioApplyToVisibleWindows(void) {
     }
 }
 
-#pragma mark - Logos group declaration MUST precede every %init using it
+#pragma mark - Logos group declaration
 
+/*
+ * IMPORTANT: Define the Logos group before the %ctor that initializes it.
+ * Logos %init cannot be called from a plain C helper function.
+ */
 %group ATRatioSelectedTargetApp
 %hook UIViewController
 
@@ -206,7 +210,7 @@ static void ATRatioApplyToVisibleWindows(void) {
 %end
 %end
 
-#pragma mark - Read the current process's own preference domain
+#pragma mark - Read the current process's preference domain
 
 static void ATRatioReloadForCurrentProcess(void) {
     NSString *bundleID = NSBundle.mainBundle.bundleIdentifier;
@@ -225,11 +229,6 @@ static void ATRatioReloadForCurrentProcess(void) {
         gATRatioTargetBundleID = [bundleID copy];
         gATRatioTarget = selected;
         gATRatioActive = YES;
-
-        if (!gATRatioHookInstalled) {
-            %init(ATRatioSelectedTargetApp);
-            gATRatioHookInstalled = YES;
-        }
     } else {
         gATRatioActive = NO;
         gATRatioTarget.width = 0.0;
@@ -253,23 +252,23 @@ static void ATRatioPreferenceChanged(CFNotificationCenterRef center,
 }
 
 static void ATRatioApplicationDidBecomeActive(NSNotification *notification) {
+    (void)notification;
     ATRatioReloadForCurrentProcess();
 }
 
-#pragma mark - Runtime entry point
+#pragma mark - Logos constructor
 
-__attribute__((constructor))
-static void ATRatioTargetRuntimeInit(void) {
+%ctor {
     @autoreleasepool {
         NSString *bundleID = NSBundle.mainBundle.bundleIdentifier;
         if (bundleID.length == 0) return;
 
+        /* Never install the target-app hook in SpringBoard or AppTools itself. */
         if ([bundleID isEqualToString:@"com.apple.springboard"] ||
             [bundleID isEqualToString:@"com.flex2areo.apptools"]) {
             return;
         }
 
-        /* Observe first, then read. This supports already-running target apps. */
         CFNotificationCenterAddObserver(
             CFNotificationCenterGetDarwinNotifyCenter(),
             NULL,
@@ -289,6 +288,12 @@ static void ATRatioTargetRuntimeInit(void) {
             }];
         }
 
+        /*
+         * Install the hook once at constructor time. The hook body is inert
+         * until this process has a valid saved ratio. This keeps %init inside
+         * a Logos block and allows later Darwin notifications to activate it.
+         */
         ATRatioReloadForCurrentProcess();
+        %init(ATRatioSelectedTargetApp);
     }
 }
