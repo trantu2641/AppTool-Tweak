@@ -1,28 +1,24 @@
-# AppTool-Tweak: build repair files
+# AppTools Safe Mode mitigation patch
 
-These are **replacement/additional files** for the existing `trantu2641/AppTool-Tweak` repository. They are not a complete source export.
+Replace these files in the repository:
 
-## Overlay these paths into the repository
-
-Replace:
-- `.github/workflows/build.yml`
 - `RatioPatch/Makefile`
+- `RatioPatch/AppToolsUI.xm`
+- `RatioPatch/AppRatioRuntime.xm`
 - `RatioPatch/AppToolsRatioPatch.plist`
 - `RatioPatch/layout/Library/MobileSubstrate/DynamicLibraries/AppToolsRatioPatch.plist`
-- `scripts/build.sh`
-- `localization/vi/Root.plist` (this replaces the current plain-text mapping file with a valid Apple plist)
 
-Add:
-- `RatioPatch/control`
-- `scripts/localize_plist.py`
-- `localization/vi/translations.json`
+## What this change does
 
-Keep the existing `RatioPatch/AppToolsUI.xm`, `RatioPatch/AppRatioRuntime.xm`, `RatioPatch/RatioStore.h`, `RatioPatch/RatioStore.m`, and `original/AppTools-2.9.0.deb`.
+- Removes `AppRatioRuntime.xm` from the compiled tweak. The previous runtime globally hooked `UIScreen.bounds`, `UIScreen.applicationFrame` and `UIWindow.layoutSubviews`, which is unsafe to run broadly in SpringBoard and can cause Safe Mode.
+- Restricts the patch filter to `com.apple.springboard`, rather than injecting the same dylib into the broad `com.apple.UIKit` filter as well.
+- Replaces the global `%hook UIViewController` with a hook scoped to the AppTools private `ATPopupViewController` class.
+- Keeps the per-Bundle-ID ratio selection UI and persistence, including automatic, presets and manual width/height.
+
+## Important limitation
+
+This is a crash-risk reduction / UI-and-storage build, not a complete working screen-ratio engine. It intentionally does not alter the actual target app's display geometry. A separate target-app component must be designed and injected only into the selected app after the selected Bundle ID path and the exact AppTools action-sheet API have been verified. Do not re-enable the old `UIScreen` / `UIWindow` hooks.
 
 ## Build
 
-Commit the files, then open **Actions → Build AppTools VI + Ratio → Run workflow**. The workflow installs Theos and the patched iPhoneOS 16.5 SDK, builds the patch package, injects the resulting dylib and filter into the original RootHide package, localizes the real `Root.plist`, regenerates package checksums, and uploads the modified `.deb`.
-
-## Important scope
-
-This repairs the build and package-assembly pipeline. It does **not** certify that the screen-ratio runtime works in every app; the viewport hooks still require on-device testing. The translation map covers the strings in the original Preferences `Root.plist`, not every hard-coded string inside the stripped `AppTool.dylib`.
+Keep the original `RatioPatch/RatioStore.h`, `RatioPatch/RatioStore.m`, `RatioPatch/AppToolsRatioCommon.h`, `RatioPatch/control`, package layout and build workflow. Replace the listed files, commit, then run GitHub Actions. Test on a secondary device first.
