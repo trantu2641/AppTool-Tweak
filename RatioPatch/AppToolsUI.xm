@@ -20,6 +20,7 @@
                    image:(UIImage *)image
                  handler:(void (^)(void))handler;
 - (void)finishAddingItems;
+- (void)buttonTouchUpInside:(id)sender;
 @end
 
 @interface ATPopupViewController : UIViewController
@@ -105,6 +106,64 @@ static UIViewController *ATRatioTopController(UIViewController *controller) {
         current = current.presentedViewController;
     }
     return current;
+}
+
+/*
+ * AppTools stores the original notification callback in its button model.
+ * Changing the visible title does not guarantee that an already-created
+ * UIButton stops dispatching that original callback. Read the visible title
+ * from the actual touch sender so buttonTouchUpInside: can intercept it.
+ */
+static BOOL ATRatioViewContainsTitle(UIView *view, NSUInteger depth) {
+    if (!view || depth > 8) return NO;
+
+    if ([view.accessibilityLabel isKindOfClass:[NSString class]] &&
+        [view.accessibilityLabel isEqualToString:kATRatioTitle]) {
+        return YES;
+    }
+
+    if ([view isKindOfClass:[UIButton class]]) {
+        UIButton *button = (UIButton *)view;
+        NSString *normalTitle = [button titleForState:UIControlStateNormal];
+        NSString *labelTitle = button.titleLabel.text;
+        NSString *accessibilityTitle = button.accessibilityLabel;
+        if ([normalTitle isEqualToString:kATRatioTitle] ||
+            [labelTitle isEqualToString:kATRatioTitle] ||
+            [accessibilityTitle isEqualToString:kATRatioTitle]) {
+            return YES;
+        }
+    }
+
+    if ([view isKindOfClass:[UILabel class]]) {
+        UILabel *label = (UILabel *)view;
+        if ([label.text isEqualToString:kATRatioTitle] ||
+            [label.attributedText.string isEqualToString:kATRatioTitle]) {
+            return YES;
+        }
+    }
+
+    for (UIView *child in view.subviews) {
+        if (ATRatioViewContainsTitle(child, depth + 1)) return YES;
+    }
+    return NO;
+}
+
+static BOOL ATRatioSenderIsRatioTile(id sender) {
+    if (!sender) return NO;
+
+    /* Some AppTools builds associate the ATActionBarItem directly to sender. */
+    if ([sender respondsToSelector:@selector(title)]) {
+        @try {
+            id value = [sender valueForKey:@"title"];
+            if ([value isKindOfClass:[NSString class]] && [value isEqualToString:kATRatioTitle]) {
+                return YES;
+            }
+        } @catch (__unused NSException *exception) {
+        }
+    }
+
+    return [sender isKindOfClass:[UIView class]] &&
+           ATRatioViewContainsTitle((UIView *)sender, 0);
 }
 
 #pragma mark - Ratio menu
@@ -382,6 +441,33 @@ static BOOL ATRatioReplaceRegisteredTile(ATActionsBarView *bar,
 
 %hook ATActionsBarView
 
+/*
+ * Definitive action override.
+ * The original notification handler may already be attached to the UIButton
+ * before the title/model arrays are patched. Intercept the actual tap here
+ * and return WITHOUT calling %orig, so the message-notification toggle can
+ * never run from the renamed tile.
+ */
+- (void)buttonTouchUpInside:(id)sender {
+    if (ATRatioSenderIsRatioTile(sender)) {
+        ATActionsBarView *bar = (ATActionsBarView *)self;
+        ATPopupViewController *popup = ATRatioPopupForBar(bar);
+        if (!popup) popup = gATRatioVisiblePopup ?: gATRatioBuildingPopup;
+
+        NSString *bundleID = [popup.bundleID copy];
+        if (![bundleID isKindOfClass:[NSString class]] || bundleID.length == 0) {
+            NSLog(@"[AppToolsRatio] Tỉ lệ màn hình tapped, but popup Bundle ID is unavailable; old notification action blocked");
+            return;
+        }
+
+        NSLog(@"[AppToolsRatio] Intercepted Tỉ lệ màn hình tap for %@; suppressing original notification handler", bundleID);
+        ATRatioShowMenu(bundleID, ATRatioTopController(popup));
+        return;
+    }
+
+    %orig(sender);
+}
+
 - (void)setRowStorageKey:(NSString *)rowStorageKey {
     %orig;
     objc_setAssociatedObject(self, &kATRatioRowKeyAssociation,
@@ -510,6 +596,7 @@ static void ATRatioTryInstallCreateTimeHooks(void) {
         class_getInstanceMethod(popupClass, @selector(viewDidLayoutSubviews));
     BOOL barReady = barClass &&
         class_getInstanceMethod(barClass, @selector(addItemWithTitle:detail:image:handler:)) &&
+        class_getInstanceMethod(barClass, @selector(buttonTouchUpInside:)) &&
         class_getInstanceMethod(barClass, @selector(rebuildArrangedSubviews)) &&
         class_getInstanceMethod(barClass, @selector(finishAddingItems));
 
