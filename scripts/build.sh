@@ -75,7 +75,10 @@ control = debian / "control"
 text = control.read_text(encoding="utf-8")
 if not re.search(r"(?m)^Version:\s*", text):
     raise SystemExit("Original package control has no Version field")
-text = re.sub(r"(?m)^Version:\s*.*$", "Version: 2.9.0-vi-ratio1", text, count=1)
+# Bump the package revision so Sileo/Zebra/dpkg cannot silently keep the
+# previously installed 2.9.0-vi-ratio1 package when reinstalling this build.
+new_version = "2.9.0-vi-ratio2"
+text = re.sub(r"(?m)^Version:\s*.*$", f"Version: {new_version}", text, count=1)
 installed_bytes = sum(
     path.stat().st_size
     for path in root.rglob("*")
@@ -104,7 +107,7 @@ for path in sorted(root.rglob("*")):
 PYCODE
 
 echo "[6/6] Build modified DEB"
-FINAL="$OUT/com.jtisvn.apptools_2.9.0-vi-ratio1_iphoneos-arm64e.deb"
+FINAL="$OUT/com.jtisvn.apptools_2.9.0-vi-ratio2_iphoneos-arm64e.deb"
 dpkg-deb --build --root-owner-group "$WORK/rootfs" "$FINAL"
 dpkg-deb --info "$FINAL"
 echo "Created: $FINAL"
