@@ -4,28 +4,53 @@
 
 #import "RatioStore.h"
 
-/* Private AppTools 2.9.0 interfaces verified from the supplied AppTool.dylib. */
+/*
+ * AppTools 2.9.0 UI integration.
+ *
+ * Verified in the original AppTool.dylib Objective-C metadata:
+ * ATPopupViewController:
+ *   - viewDidLayoutSubviews
+ *   - bundleID
+ *   - liveActionsBarWithRowStorageKey:
+ * ATActionsBarView:
+ *   - rowStorageKey
+ *   - itemTitles / itemDetails / itemImages / itemHandlers
+ *   - setTitle:forItemAtIndex:
+ *   - setDetail:forItemAtIndex:
+ *   - setItemImages:
+ *   - setItemHandlers:
+ *   - rebuildArrangedSubviews
+ *
+ * This patch does not create a floating UIButton and does not hook
+ * UIScreen or UIWindow. It replaces the first existing tile in app_row2
+ * (the tile shown as "Thông báo tin nhắn" in the supplied screenshot).
+ */
+
 @interface ATActionsBarView : UIView
-@property(nonatomic, copy) NSString *rowStorageKey;
-@property(nonatomic, copy) NSArray *itemTitles;
-@property(nonatomic, copy) NSArray *registeredTitles;
-- (void)addItemWithTitle:(NSString *)title
-                  detail:(NSString *)detail
-                   image:(UIImage *)image
-                 handler:(void (^)(void))handler;
+@property(nonatomic, readonly, copy) NSString *rowStorageKey;
+@property(nonatomic, readonly, copy) NSMutableArray *itemTitles;
+@property(nonatomic, readonly, copy) NSMutableArray *itemDetails;
+@property(nonatomic, readonly, copy) NSMutableArray *itemImages;
+@property(nonatomic, readonly, copy) NSMutableArray *itemHandlers;
+- (void)setTitle:(NSString *)title forItemAtIndex:(NSInteger)index;
+- (void)setDetail:(NSString *)detail forItemAtIndex:(NSInteger)index;
+- (void)setItemImages:(NSMutableArray *)images;
+- (void)setItemHandlers:(NSMutableArray *)handlers;
+- (void)rebuildArrangedSubviews;
 @end
 
 @interface ATPopupViewController : UIViewController
-@property(nonatomic, copy) NSString *bundleID;
+@property(nonatomic, readonly, copy) NSString *bundleID;
+- (ATActionsBarView *)liveActionsBarWithRowStorageKey:(NSString *)rowStorageKey;
 @end
 
 static NSString * const kATRatioRowKey = @"ATBarLayout_app_row2";
 static NSString * const kATRatioTitle = @"Tỉ lệ màn hình";
-static ATPopupViewController *gATCurrentPopup = nil; // cleared when the popup disappears
+static char kATRatioInstalledOnPopupKey;
 static BOOL gATRatioHooksInstalled = NO;
-static NSUInteger gATRatioInstallAttempts = 0;
+static NSUInteger gATRatioHookInstallAttempts = 0;
 
-#pragma mark - Ratio icon
+#pragma mark - Tile icon
 
 static UIImage *ATRatioCreateIcon(void) {
     CGSize size = CGSizeMake(64.0, 64.0);
@@ -62,24 +87,7 @@ static UIImage *ATRatioCreateIcon(void) {
     return [image imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal];
 }
 
-#pragma mark - Popup lookup and ratio menu
-
-static ATPopupViewController *ATRatioPopupForBar(ATActionsBarView *bar) {
-    Class popupClass = objc_getClass("ATPopupViewController");
-
-    UIResponder *responder = bar;
-    NSUInteger depth = 0;
-
-    while (responder && depth++ < 80) {
-        if (popupClass && [responder isKindOfClass:popupClass]) {
-            return (ATPopupViewController *)responder;
-        }
-
-        responder = responder.nextResponder;
-    }
-
-    return gATCurrentPopup;
-}
+#pragma mark - Menu
 
 static UIViewController *ATRatioTopController(UIViewController *controller) {
     UIViewController *current = controller;
@@ -95,9 +103,12 @@ static void ATRatioConfigurePopover(UIAlertController *alert,
     if (!popover || !presenter.isViewLoaded) return;
     popover.sourceView = presenter.view;
     popover.sourceRect = CGRectMake(CGRectGetMidX(presenter.view.bounds),
-                                    CGRectGetMidY(presenter.view.bounds), 1.0, 1.0);
+                                    CGRectGetMidY(presenter.view.bounds),
+                                    1.0, 1.0);
     popover.permittedArrowDirections = 0;
 }
+
+static void ATRatioShowMenu(NSString *bundleID, UIViewController *presenter);
 
 static void ATRatioShowCustomInput(NSString *bundleID,
                                    UIViewController *presenter) {
@@ -131,7 +142,7 @@ static void ATRatioShowCustomInput(NSString *bundleID,
         if (!isfinite(width) || !isfinite(height) || width <= 0.0 || height <= 0.0) {
             UIAlertController *error = [UIAlertController
                 alertControllerWithTitle:@"Giá trị không hợp lệ"
-                                 message:@"Chiều rộng và chiều cao phải lớn hơn 0."
+                                 message:@"Chiều rộng và chiều cao phải là số lớn hơn 0."
                           preferredStyle:UIAlertControllerStyleAlert];
             [error addAction:[UIAlertAction actionWithTitle:@"Đóng"
                                                      style:UIAlertActionStyleDefault
@@ -148,8 +159,7 @@ static void ATRatioShowCustomInput(NSString *bundleID,
     [presenter presentViewController:alert animated:YES completion:nil];
 }
 
-static void ATRatioShowMenu(NSString *bundleID,
-                            UIViewController *presenter) {
+static void ATRatioShowMenu(NSString *bundleID, UIViewController *presenter) {
     if (bundleID.length == 0 || !presenter) return;
 
     UIAlertController *alert = [UIAlertController
@@ -198,102 +208,152 @@ static void ATRatioShowMenu(NSString *bundleID,
     [presenter presentViewController:alert animated:YES completion:nil];
 }
 
-#pragma mark - Replace the existing first tile in app_row2
+#pragma mark - Find AppTools app_row2
+
+static ATActionsBarView *ATRatioFindAppRow2(ATPopupViewController *popup) {
+    if (!popup) return nil;
+
+    /* Preferred, documented-by-runtime accessor from ATPopupViewController. */
+    ATActionsBarView *bar = nil;
+    @try {
+        bar = [popup liveActionsBarWithRowStorageKey:kATRatioRowKey];
+    } @catch (NSException *exception) {
+        NSLog(@"[AppToolsRatio] liveActionsBar lookup exception: %@", exception);
+    }
+    if (bar) {
+        NSString *resolvedKey = bar.rowStorageKey;
+        if (resolvedKey.length == 0 || [resolvedKey isEqualToString:kATRatioRowKey]) {
+            return bar;
+        }
+    }
+
+    /* Fallback: locate the existing row in the popup's view hierarchy. */
+    if (!popup.isViewLoaded) return nil;
+    NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:popup.view];
+    NSUInteger cursor = 0;
+    while (cursor < queue.count && cursor < 4096) {
+        UIView *view = queue[cursor++];
+        if ([NSStringFromClass(view.class) isEqualToString:@"ATActionsBarView"]) {
+            ATActionsBarView *candidate = (ATActionsBarView *)view;
+            if ([candidate.rowStorageKey isEqualToString:kATRatioRowKey]) {
+                return candidate;
+            }
+        }
+        [queue addObjectsFromArray:view.subviews ?: @[]];
+    }
+    return nil;
+}
+
+#pragma mark - Replace the existing "Thông báo tin nhắn" tile
+
+static BOOL ATRatioReplaceFirstTile(ATPopupViewController *popup) {
+    if (!popup) return NO;
+
+    ATActionsBarView *bar = ATRatioFindAppRow2(popup);
+    if (!bar) {
+        NSLog(@"[AppToolsRatio] app_row2 not ready for %@", popup.bundleID);
+        return NO;
+    }
+
+    NSArray *titles = bar.itemTitles;
+    NSMutableArray *images = [bar.itemImages mutableCopy];
+    NSMutableArray *handlers = [bar.itemHandlers mutableCopy];
+    NSArray *details = bar.itemDetails;
+
+    if (titles.count == 0 || images.count == 0 || handlers.count == 0) {
+        NSLog(@"[AppToolsRatio] app_row2 arrays not ready. titles=%lu images=%lu handlers=%lu details=%lu",
+              (unsigned long)titles.count,
+              (unsigned long)images.count,
+              (unsigned long)handlers.count,
+              (unsigned long)details.count);
+        return NO;
+    }
+
+    NSString *oldTitle = [titles.firstObject isKindOfClass:[NSString class]]
+        ? titles.firstObject : @"";
+    if ([oldTitle isEqualToString:kATRatioTitle]) return YES;
+
+    __weak ATPopupViewController *weakPopup = popup;
+    void (^ratioHandler)(void) = ^{
+        __strong ATPopupViewController *strongPopup = weakPopup;
+        if (!strongPopup) return;
+        NSString *bundleID = strongPopup.bundleID;
+        if (![bundleID isKindOfClass:[NSString class]] || bundleID.length == 0) {
+            NSLog(@"[AppToolsRatio] selected app Bundle ID is empty");
+            return;
+        }
+        UIViewController *presenter = ATRatioTopController(strongPopup);
+        ATRatioShowMenu(bundleID, presenter);
+    };
+
+    UIImage *icon = ATRatioCreateIcon();
+    if (!icon) return NO;
+
+    /* Keep the original row size and position: change only item index 0. */
+    [bar setTitle:kATRatioTitle forItemAtIndex:0];
+    [bar setDetail:nil forItemAtIndex:0];
+    images[0] = icon;
+    handlers[0] = [ratioHandler copy];
+    [bar setItemImages:images];
+    [bar setItemHandlers:handlers];
+    [bar rebuildArrangedSubviews];
+
+    NSLog(@"[AppToolsRatio] Replaced app_row2 item '%@' with '%@' for %@",
+          oldTitle, kATRatioTitle, popup.bundleID);
+    return YES;
+}
+
+#pragma mark - SpringBoard hook
 
 %group ATRatioAppToolsUI
-
 %hook ATPopupViewController
 
-- (void)viewDidLoad {
+- (void)viewDidLayoutSubviews {
     %orig;
-    gATCurrentPopup = (ATPopupViewController *)self;
-}
 
-- (void)viewDidAppear:(BOOL)animated {
-    %orig;
-    gATCurrentPopup = (ATPopupViewController *)self;
-}
+    if (objc_getAssociatedObject(self, &kATRatioInstalledOnPopupKey)) return;
 
-- (void)viewDidDisappear:(BOOL)animated {
-    %orig;
-    if (gATCurrentPopup == (ATPopupViewController *)self) {
-        gATCurrentPopup = nil;
-    }
-}
+    __weak ATPopupViewController *weakPopup = (ATPopupViewController *)self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        __strong ATPopupViewController *popup = weakPopup;
+        if (!popup) return;
 
-%end
-
-%hook ATActionsBarView
-
-- (void)addItemWithTitle:(NSString *)title
-                  detail:(NSString *)detail
-                   image:(UIImage *)image
-                 handler:(void (^)(void))handler {
-
-    NSString *rowKey = self.rowStorageKey;
-    NSArray *existingTitles = self.itemTitles;
-    NSUInteger itemIndex = existingTitles.count;
-
-    /*
-     * In the supplied AppTools 2.9.0 panel, app_row2 starts with
-     * "Thông báo tin nhắn". Replace that existing tile rather than adding
-     * a new button at the edge or overlapping another tile.
-     */
-    if ([rowKey isEqualToString:kATRatioRowKey] && itemIndex == 0) {
-        ATPopupViewController *popup = ATRatioPopupForBar(self);
-        if (!popup) popup = gATCurrentPopup;
-
-        NSString *bundleID = [popup.bundleID copy];
-        __weak ATPopupViewController *weakPopup = popup;
-        __weak ATActionsBarView *weakBar = self;
-        UIImage *ratioIcon = ATRatioCreateIcon();
-
-        void (^ratioHandler)(void) = ^{
-            ATPopupViewController *activePopup = weakPopup;
-            if (!activePopup) {
-                activePopup = ATRatioPopupForBar(weakBar);
-            }
-            if (!activePopup) activePopup = gATCurrentPopup;
-
-            NSString *targetBundleID = bundleID.length ? bundleID : activePopup.bundleID;
-            if (targetBundleID.length == 0 || !activePopup) {
-                NSLog(@"[AppToolsRatio] Could not resolve the selected app Bundle ID.");
-                return;
-            }
-
-            ATRatioShowMenu(targetBundleID, ATRatioTopController(activePopup));
-        };
-
-        NSLog(@"[AppToolsRatio] Replacing app_row2 item '%@' with Screen Ratio.", title);
-        %orig(kATRatioTitle, nil, ratioIcon ?: image, ratioHandler);
-        return;
-    }
-
-    %orig(title, detail, image, handler);
+        if (ATRatioReplaceFirstTile(popup)) {
+            objc_setAssociatedObject(popup,
+                                     &kATRatioInstalledOnPopupKey,
+                                     @YES,
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+    });
 }
 
 %end
 %end
 
-#pragma mark - Delayed Logos installation (AppTool.dylib may load first/after us)
+#pragma mark - Delayed installation and diagnostics
 
-static void ATRatioAttemptInstallHooks(void) {
+static void ATRatioTryInstallHooks(void) {
     if (gATRatioHooksInstalled) return;
 
-    if (objc_getClass("ATPopupViewController") && objc_getClass("ATActionsBarView")) {
+    Class popupClass = objc_getClass("ATPopupViewController");
+    Class barClass = objc_getClass("ATActionsBarView");
+
+    if (popupClass && barClass) {
         %init(ATRatioAppToolsUI);
         gATRatioHooksInstalled = YES;
-        NSLog(@"[AppToolsRatio] App-specific ratio tile hook installed.");
+        NSLog(@"[AppToolsRatio] UI hook installed. popup=%@ bar=%@",
+              NSStringFromClass(popupClass), NSStringFromClass(barClass));
         return;
     }
 
-    if (gATRatioInstallAttempts++ < 40) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
+    if (gATRatioHookInstallAttempts++ < 240) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
-            ATRatioAttemptInstallHooks();
+            ATRatioTryInstallHooks();
         });
     } else {
-        NSLog(@"[AppToolsRatio] AppTools classes were not found in SpringBoard; tile hook not installed.");
+        NSLog(@"[AppToolsRatio] UI hook not installed. popup=%p bar=%p",
+              popupClass, barClass);
     }
 }
 
@@ -303,8 +363,9 @@ static void ATRatioAppToolsUIInit(void) {
         NSString *bundleID = NSBundle.mainBundle.bundleIdentifier;
         if (![bundleID isEqualToString:@"com.apple.springboard"]) return;
 
+        NSLog(@"[AppToolsRatio] UI patch dylib loaded in SpringBoard");
         dispatch_async(dispatch_get_main_queue(), ^{
-            ATRatioAttemptInstallHooks();
+            ATRatioTryInstallHooks();
         });
     }
 }
