@@ -23,7 +23,7 @@
 @end
 
 static NSString * const kATRatioFeatureTitle = @"Tỉ lệ màn hình";
-static NSString * const kATRatioFeatureRow = @"ATBarLayout_app_row0";
+static NSString * const kATRatioFeatureRow = @"ATBarLayout_app_row2";
 static char kATRatioFeatureInstalledKey;
 
 #pragma mark - Icon
