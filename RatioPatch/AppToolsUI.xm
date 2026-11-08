@@ -262,16 +262,6 @@ static void ATRShowRatioMenu(NSString *bundleID) {
 
 #pragma mark - Action item discovery
 
-static BOOL ATRIsActionButton(UIView *view) {
-
-    NSString *className =
-        NSStringFromClass([view class]);
-
-    return
-        [className containsString:@"ATAction"] ||
-        [className containsString:@"ActionButton"];
-}
-
 
 static void ATRInstallRatioButton(UIViewController *controller) {
 
