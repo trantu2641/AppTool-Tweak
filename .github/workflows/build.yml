@@ -58,9 +58,19 @@ jobs:
           cd RatioPatch
           rm -rf packages .theos
           make clean
-          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide
-          PATCH_DYLIB="$(find packages -type f -name 'AppToolsRatioPatch.dylib' -print -quit)"
-          test -n "$PATCH_DYLIB"
+          # Build and stage the tweak only. Theos' dm.pl package step is not
+          # needed because scripts/build.sh repacks the final original package
+          # with dpkg-deb. Skipping `make package` also avoids the dm.pl failure
+          # on the GitHub macOS runner.
+          make stage FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide
+          STAGE_DIR="$PWD/.theos/_"
+          PATCH_DYLIB="$(find "$STAGE_DIR" -type f -path '*/DynamicLibraries/AppToolsRatioPatch.dylib' -print -quit)"
+          PATCH_PLIST="$(find "$STAGE_DIR" -type f -path '*/DynamicLibraries/AppToolsRatioPatch.plist' -print -quit)"
+          if [[ -z "$PATCH_DYLIB" || -z "$PATCH_PLIST" ]]; then
+            echo "ERROR: Theos staging did not produce the tweak dylib and filter plist." >&2
+            find .theos -maxdepth 8 -type f -print >&2 || true
+            exit 1
+          fi
           otool -l "$PATCH_DYLIB" > "$RUNNER_TEMP/patch-load-commands.txt"
           if grep -q '/var/jb/' "$RUNNER_TEMP/patch-load-commands.txt"; then
             echo "ERROR: rootless /var/jb runpath found in RootHide dylib" >&2
@@ -68,7 +78,6 @@ jobs:
             exit 1
           fi
           grep -q '@loader_path/.jbroot' "$RUNNER_TEMP/patch-load-commands.txt"
-          test -n "$(find packages -maxdepth 1 -type f -name '*.deb' -print -quit)"
 
       - name: Repack original AppTools
         shell: bash
