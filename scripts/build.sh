@@ -6,36 +6,33 @@ ORIGINAL="$ROOT/original/AppTools-2.9.0.deb"
 PATCH_DIR="$ROOT/RatioPatch"
 WORK="$ROOT/.work"
 OUT="$ROOT/dist"
-PATCH_PACKAGES="$PATCH_DIR/packages"
+PATCH_STAGING="$PATCH_DIR/.theos/_"
 
 if [[ ! -f "$ORIGINAL" ]]; then
   echo "ERROR: Missing original package: $ORIGINAL" >&2
   exit 1
 fi
 
-PATCH_DEB="$(find "$PATCH_PACKAGES" -maxdepth 1 -type f -name '*.deb' -print | sort | tail -n 1)"
-if [[ -z "$PATCH_DEB" ]]; then
-  echo "ERROR: No patch package found. Build RatioPatch first." >&2
+if [[ ! -d "$PATCH_STAGING" ]]; then
+  echo "ERROR: Theos staging directory not found: $PATCH_STAGING" >&2
+  echo "Build RatioPatch with: make stage FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide" >&2
+  exit 1
+fi
+
+PATCH_DYLIB="$(find "$PATCH_STAGING" -type f -path '*/DynamicLibraries/AppToolsRatioPatch.dylib' -print -quit)"
+PATCH_PLIST="$(find "$PATCH_STAGING" -type f -path '*/DynamicLibraries/AppToolsRatioPatch.plist' -print -quit)"
+if [[ -z "$PATCH_DYLIB" || -z "$PATCH_PLIST" ]]; then
+  echo "ERROR: AppToolsRatioPatch.dylib or its filter plist is missing from Theos staging." >&2
+  find "$PATCH_STAGING" -type f -print >&2
   exit 1
 fi
 
 rm -rf "$WORK" "$OUT"
-mkdir -p "$WORK/rootfs" "$WORK/control" "$WORK/patch" "$OUT"
+mkdir -p "$WORK/rootfs" "$WORK/control" "$OUT"
 
-echo "[1/7] Extract original AppTools RootHide package"
+echo "[1/6] Extract original AppTools RootHide package"
 dpkg-deb -x "$ORIGINAL" "$WORK/rootfs"
 dpkg-deb -e "$ORIGINAL" "$WORK/control"
-
-echo "[2/7] Extract RootHide-built RatioPatch package"
-dpkg-deb -x "$PATCH_DEB" "$WORK/patch"
-
-PATCH_DYLIB="$(find "$WORK/patch" -type f -name 'AppToolsRatioPatch.dylib' -print -quit)"
-PATCH_PLIST="$(find "$WORK/patch" -type f -path '*/DynamicLibraries/AppToolsRatioPatch.plist' -print -quit)"
-if [[ -z "$PATCH_DYLIB" || -z "$PATCH_PLIST" ]]; then
-  echo "ERROR: patch dylib or filter plist missing in $PATCH_DEB" >&2
-  find "$WORK/patch" -type f -print >&2
-  exit 1
-fi
 
 # RootHide builds must use @loader_path/.jbroot paths, not /var/jb paths.
 if ! command -v otool >/dev/null 2>&1; then
@@ -53,7 +50,7 @@ if ! printf '%s\n' "$LOAD_COMMANDS" | grep -q '@loader_path/.jbroot'; then
   exit 1
 fi
 
-echo "[3/7] Install the normal tweak dylib and filter plist"
+echo "[2/6] Install the normal tweak dylib and filter plist"
 DYNAMIC="$WORK/rootfs/Library/MobileSubstrate/DynamicLibraries"
 mkdir -p "$DYNAMIC"
 cp "$PATCH_DYLIB" "$DYNAMIC/AppToolsRatioPatch.dylib"
@@ -71,7 +68,7 @@ if [[ ! -L "$DYNAMIC/AppTool.dylib.roothidepatch" ]]; then
   exit 1
 fi
 
-echo "[4/7] Translate existing Preferences plist"
+echo "[3/6] Translate existing Preferences plist"
 ROOT_PLIST="$WORK/rootfs/Library/PreferenceBundles/AppTools.bundle/Root.plist"
 TRANSLATIONS="$ROOT/localization/vi/translations.json"
 if [[ -f "$ROOT_PLIST" && -f "$TRANSLATIONS" ]]; then
@@ -81,7 +78,7 @@ else
   echo "WARNING: localization source missing; preserving original Root.plist." >&2
 fi
 
-echo "[5/7] Prepare original package metadata"
+echo "[4/6] Prepare original package metadata"
 mkdir -p "$WORK/rootfs/DEBIAN"
 cp -a "$WORK/control/." "$WORK/rootfs/DEBIAN/"
 python3 - "$WORK/rootfs" <<'PYCODE'
@@ -113,11 +110,11 @@ for path in sorted(root.rglob("*")):
 (debian / "md5sums").write_text("\n".join(md5_lines) + "\n", encoding="utf-8")
 PYCODE
 
-echo "[6/7] Build modified AppTools DEB"
+echo "[5/6] Build modified AppTools DEB"
 FINAL="$OUT/com.jtisvn.apptools_2.9.0-vi-ratio4_iphoneos-arm64e.deb"
 dpkg-deb --build --root-owner-group "$WORK/rootfs" "$FINAL"
 
-echo "[7/7] Verify RootHide package layout"
+echo "[6/6] Verify RootHide package layout"
 dpkg-deb -c "$FINAL" > "$WORK/package-list.txt"
 grep -q 'AppToolsRatioPatch.dylib$' "$WORK/package-list.txt"
 grep -q 'AppToolsRatioPatch.plist$' "$WORK/package-list.txt"
