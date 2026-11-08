@@ -1,27 +1,263 @@
-通用设置       → Cài đặt chung
-启用插件功能   → Bật chức năng tweak
-启用3DTouch    → Bật 3D Touch
-显示提示信息   → Hiển thị thông báo
-显示更多信息   → Hiển thị thêm thông tin
-禁用布局功能   → Tắt chức năng bố cục
-Dock图标禁用   → Tắt biểu tượng Dock
-
-触发方式       → Cách kích hoạt
-上滑           → Vuốt lên
-下滑           → Vuốt xuống
-关闭           → Tắt
-
-弹出方向       → Hướng hiển thị
-底部           → Dưới
-左侧           → Trái
-右侧           → Phải
-
-界面样式       → Kiểu giao diện
-浅色           → Sáng
-深色           → Tối
-自动           → Tự động
-
-当前版本       → Phiên bản hiện tại
-授权状态       → Trạng thái cấp phép
-赞助激活       → Kích hoạt bằng tài trợ
-关于与配置     → Giới thiệu và cấu hình
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>items</key>
+	<array>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>Cài đặt chung</string>
+		</dict>
+		<dict>
+			<key>PostNotification</key>
+			<string>com.flex2areo.apptools/preferences.changed</string>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<false/>
+			<key>defaults</key>
+			<string>com.flex2areo.apptools</string>
+			<key>key</key>
+			<string>EnableAll</string>
+			<key>label</key>
+			<string>Bật chức năng tweak</string>
+		</dict>
+		<dict>
+			<key>PostNotification</key>
+			<string>com.flex2areo.apptools/preferences.changed</string>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<false/>
+			<key>defaults</key>
+			<string>com.flex2areo.apptools</string>
+			<key>key</key>
+			<string>EnableForcetouch</string>
+			<key>label</key>
+			<string>Bật 3D Touch</string>
+		</dict>
+		<dict>
+			<key>PostNotification</key>
+			<string>com.flex2areo.apptools/preferences.changed</string>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<false/>
+			<key>defaults</key>
+			<string>com.flex2areo.apptools</string>
+			<key>key</key>
+			<string>ShowProgressHud</string>
+			<key>label</key>
+			<string>Hiển thị thông báo</string>
+		</dict>
+		<dict>
+			<key>PostNotification</key>
+			<string>com.flex2areo.apptools/preferences.changed</string>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<false/>
+			<key>defaults</key>
+			<string>com.flex2areo.apptools</string>
+			<key>key</key>
+			<string>ShowsMoreInfo</string>
+			<key>label</key>
+			<string>Hiển thị thêm thông tin</string>
+		</dict>
+		<dict>
+			<key>PostNotification</key>
+			<string>com.flex2areo.apptools/preferences.changed</string>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.flex2areo.apptools</string>
+			<key>key</key>
+			<string>DisableLayout</string>
+			<key>label</key>
+			<string>Tắt chức năng bố cục</string>
+		</dict>
+		<dict>
+			<key>PostNotification</key>
+			<string>com.flex2areo.apptools/preferences.changed</string>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<false/>
+			<key>defaults</key>
+			<string>com.flex2areo.apptools</string>
+			<key>key</key>
+			<string>DisableDock</string>
+			<key>label</key>
+			<string>Tắt biểu tượng Dock</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>footerText</key>
+			<string>Thay đổi cách kích hoạt cần đăng xuất để có hiệu lực.
+</string>
+			<key>label</key>
+			<string>Cách kích hoạt</string>
+		</dict>
+		<dict>
+			<key>PostNotification</key>
+			<string>com.flex2areo.apptools/preferences.changed</string>
+			<key>cell</key>
+			<string>PSSegmentCell</string>
+			<key>default</key>
+			<string>0</string>
+			<key>defaults</key>
+			<string>com.flex2areo.apptools</string>
+			<key>key</key>
+			<string>directionWay</string>
+			<key>validTitles</key>
+			<array>
+				<string>Vuốt lên</string>
+				<string>Vuốt xuống</string>
+				<string>Tắt</string>
+			</array>
+			<key>validValues</key>
+			<array>
+				<string>0</string>
+				<string>1</string>
+				<string>2</string>
+			</array>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>footerText</key>
+			<string>Khi chọn hiển thị bên trái hoặc phải, nhấn giữ cạnh bảng để điều chỉnh kích thước.
+</string>
+			<key>label</key>
+			<string>Hướng hiển thị</string>
+		</dict>
+		<dict>
+			<key>PostNotification</key>
+			<string>com.flex2areo.apptools/preferences.changed</string>
+			<key>cell</key>
+			<string>PSSegmentCell</string>
+			<key>default</key>
+			<string>0</string>
+			<key>defaults</key>
+			<string>com.flex2areo.apptools</string>
+			<key>key</key>
+			<string>swipeWay</string>
+			<key>validTitles</key>
+			<array>
+				<string>Dưới</string>
+				<string>Bên trái</string>
+				<string>Bên phải</string>
+			</array>
+			<key>validValues</key>
+			<array>
+				<string>0</string>
+				<string>1</string>
+				<string>2</string>
+			</array>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>Giao diện</string>
+		</dict>
+		<dict>
+			<key>PostNotification</key>
+			<string>com.flex2areo.apptools/preferences.changed</string>
+			<key>cell</key>
+			<string>PSSegmentCell</string>
+			<key>default</key>
+			<string>2</string>
+			<key>defaults</key>
+			<string>com.flex2areo.apptools</string>
+			<key>key</key>
+			<string>appearanceStyle</string>
+			<key>validTitles</key>
+			<array>
+				<string>Sáng</string>
+				<string>Tối</string>
+				<string>Tự động</string>
+			</array>
+			<key>validValues</key>
+			<array>
+				<string>0</string>
+				<string>1</string>
+				<string>2</string>
+			</array>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+		</dict>
+		<dict>
+			<key>alignment</key>
+			<integer>0</integer>
+			<key>cell</key>
+			<string>PSTitleValueCell</string>
+			<key>get</key>
+			<string>Phiên bản:</string>
+			<key>icon</key>
+			<string>version@3x.png</string>
+			<key>label</key>
+			<string>Phiên bản hiện tại</string>
+		</dict>
+		<dict>
+			<key>alignment</key>
+			<integer>0</integer>
+			<key>cell</key>
+			<string>PSTitleValueCell</string>
+			<key>get</key>
+			<string>Trạng thái:</string>
+			<key>icon</key>
+			<string>activication@3x.png</string>
+			<key>label</key>
+			<string>Trạng thái cấp phép</string>
+		</dict>
+		<dict>
+			<key>action</key>
+			<string>Donate</string>
+			<key>alignment</key>
+			<integer>0</integer>
+			<key>cell</key>
+			<string>PSTitleValueCell</string>
+			<key>get</key>
+			<string>Ủng hộ:</string>
+			<key>icon</key>
+			<string>donation@3x.png</string>
+			<key>label</key>
+			<string>Kích hoạt bằng tài trợ</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+		</dict>
+		<dict>
+			<key>action</key>
+			<string>About</string>
+			<key>alignment</key>
+			<integer>2</integer>
+			<key>cell</key>
+			<string>PSButtonCell</string>
+			<key>label</key>
+			<string>Giới thiệu và cấu hình</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>footerAlignment</key>
+			<integer>1</integer>
+			<key>footerText</key>
+			<string>Đặc biệt cảm ơn
+ren — Atria
+Fouad Raheb — AppData</string>
+		</dict>
+	</array>
+	<key>title</key>
+	<string>AppTools</string>
+</dict>
+</plist>
