@@ -5,7 +5,6 @@
 
 #pragma mark - Runtime state
 
-static BOOL ATRRuntimeEnabled = YES;
 
 static CGRect ATROriginalScreenBounds =
     CGRectZero;
